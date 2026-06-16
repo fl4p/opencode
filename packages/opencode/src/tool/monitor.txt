@@ -1,0 +1,13 @@
+Run a long-lived command in the background and get notified whenever it emits a new line on stdout. The tool returns immediately after arming the monitor; each subsequent non-empty stdout line wakes the model with a new message. Use this for watching files, processes, or any event source that produces one line per event.
+
+IMPORTANT:
+- The command must keep running and emit ONE line per actual event. It must not exit immediately.
+- Do not re-arm the same monitor repeatedly. If you need to change the watch, stop the old one first (or use a different description).
+- If the command exits on its own (e.g., the chosen watcher is not installed), you will get a wake-up message telling you it exited, so you can re-arm with a portable command.
+- For file-change watches, use `tail -F PATH` (follows the file forever, emits each new line as an event). If `tail -F` is not available, use: `while :; do cat PATH; sleep 1; done`.
+- For directory changes, use `find PATH -type f | sort | md5sum` in a loop.
+
+Parameters:
+- command: the shell command to run (must keep running and emit one line per event)
+- description: short description of what is being watched (used in event messages)
+- timeoutMs: optional maximum lifetime of the monitor in milliseconds; if omitted, it runs until the process exits or the session ends
