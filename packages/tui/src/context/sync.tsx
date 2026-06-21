@@ -185,17 +185,7 @@ export const {
           void bootstrap()
           break
         case "permission.replied": {
-          const requests = store.permission[event.properties.sessionID]
-          if (!requests) break
-          const match = search(requests, event.properties.requestID, (r) => r.id)
-          if (!match.found) break
-          setStore(
-            "permission",
-            event.properties.sessionID,
-            produce((draft) => {
-              draft.splice(match.index, 1)
-            }),
-          )
+          removePermission(event.properties.sessionID, event.properties.requestID)
           break
         }
 
@@ -442,6 +432,20 @@ export const {
       }
     })
 
+    function removePermission(sessionID: string, requestID: string) {
+      const requests = store.permission[sessionID]
+      if (!requests) return
+      const match = search(requests, requestID, (request) => request.id)
+      if (!match.found) return
+      setStore(
+        "permission",
+        sessionID,
+        produce((draft) => {
+          draft.splice(match.index, 1)
+        }),
+      )
+    }
+
     const exit = useExit()
     const args = useArgs()
 
@@ -569,6 +573,9 @@ export const {
       },
       get path() {
         return project.instance.path()
+      },
+      permission: {
+        remove: removePermission,
       },
       session: {
         get(sessionID: string) {

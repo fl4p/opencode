@@ -536,6 +536,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
 
     event.on("permission.asked", (evt, metadata) => {
       if (permission.mode !== "auto") return
+      sync.permission.remove(evt.properties.sessionID, evt.properties.id)
       void sdk.client.permission.reply({
         requestID: evt.properties.id,
         reply: "once",
