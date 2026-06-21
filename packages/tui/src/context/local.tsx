@@ -23,6 +23,8 @@ export type LocalTheme = {
   info: RGBA
 }
 
+export type PermissionMode = "auto" | "normal"
+
 export function parseModel(model: string) {
   const [providerID, ...rest] = model.split("/")
   return {
@@ -56,6 +58,8 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
     const theme = useTheme().theme
     const route = useRoute()
     const paths = useTuiPaths()
+    const args = useArgs()
+    const event = useEvent()
 
     function isModelValid(model: { providerID: string; modelID: string }) {
       const provider = sync.data.provider.find((item) => item.id === model.providerID)
@@ -190,7 +194,6 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           if (state.pending) save()
         })
 
-      const args = useArgs()
       const fallbackModel = createMemo(() => {
         if (args.model) {
           const { providerID, modelID } = parseModel(args.model)
@@ -446,8 +449,6 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           if (state.pending) save()
         })
 
-      const event = useEvent()
-
       const slots = createMemo(() => {
         const existing = new Set(sync.data.session.filter((x) => x.parentID === undefined).map((x) => x.id))
         return sessionStore.pinned.filter((id) => existing.has(id)).slice(0, 9)
@@ -518,6 +519,20 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       },
     }
 
+    const permission: { mode: PermissionMode } = {
+      mode: args.yolo ? "auto" : "normal",
+    }
+
+    event.on("permission.asked", (evt, metadata) => {
+      if (permission.mode !== "auto") return
+      void sdk.client.permission.reply({
+        requestID: evt.properties.id,
+        reply: "once",
+        directory: metadata.directory,
+        workspace: metadata.workspace,
+      })
+    })
+
     createEffect(() => {
       const value = agent.current()
       if (!value?.model) return
@@ -534,6 +549,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       agent,
       mcp,
       session,
+      permission,
     }
     return result
   },
