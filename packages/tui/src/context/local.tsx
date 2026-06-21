@@ -12,6 +12,7 @@ import { readJson, writeJsonAtomic } from "../util/persistence"
 import { useTheme } from "./theme"
 import { useToast } from "../ui/toast"
 import { useRoute } from "./route"
+import { usePermission } from "./permission"
 
 export type LocalTheme = {
   secondary: RGBA
@@ -22,8 +23,6 @@ export type LocalTheme = {
   error: RGBA
   info: RGBA
 }
-
-export type PermissionMode = "auto" | "normal"
 
 export function parseModel(model: string) {
   const [providerID, ...rest] = model.split("/")
@@ -60,6 +59,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
     const paths = useTuiPaths()
     const args = useArgs()
     const event = useEvent()
+    const permission = usePermission()
 
     function isModelValid(model: { providerID: string; modelID: string }) {
       const provider = sync.data.provider.find((item) => item.id === model.providerID)
@@ -518,32 +518,6 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         }
       },
     }
-
-    const [permissionStore, setPermissionStore] = createStore<{ mode: PermissionMode }>({
-      mode: args.yolo ? "auto" : "normal",
-    })
-    const permission = {
-      get mode() {
-        return permissionStore.mode
-      },
-      set(mode: PermissionMode) {
-        setPermissionStore("mode", mode)
-      },
-      toggle() {
-        setPermissionStore("mode", (mode) => (mode === "auto" ? "normal" : "auto"))
-      },
-    }
-
-    event.on("permission.asked", (evt, metadata) => {
-      if (permission.mode !== "auto") return
-      sync.permission.remove(evt.properties.sessionID, evt.properties.id)
-      void sdk.client.permission.reply({
-        requestID: evt.properties.id,
-        reply: "once",
-        directory: metadata.directory,
-        workspace: metadata.workspace,
-      })
-    })
 
     createEffect(() => {
       const value = agent.current()

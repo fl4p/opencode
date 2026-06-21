@@ -31,6 +31,7 @@ import { useArgs } from "./args"
 import { batch, onMount } from "solid-js"
 import path from "path"
 import { useKV } from "./kv"
+import { usePermission } from "./permission"
 
 const emptyConsoleState: ConsoleState = {
   consoleManagedProviders: [],
@@ -59,6 +60,7 @@ export const {
   init: () => {
     const startup = useTuiStartup()
     const kv = useKV()
+    const permission = usePermission()
     const [store, setStore] = createStore<{
       status: "loading" | "partial" | "complete"
       provider: Provider[]
@@ -169,7 +171,7 @@ export const {
         .then((x) => (x.data ?? []).toSorted((a, b) => a.id.localeCompare(b.id)))
     }
 
-    event.subscribe((event, { workspace }) => {
+    event.subscribe((event, { directory, workspace }) => {
       // Running monitor/bash_background count, published by the worker thread so the
       // main-thread footer can render it (the count shim can't cross threads). Handled
       // before the typed switch with a string compare: this event is defined via
@@ -185,12 +187,31 @@ export const {
           void bootstrap()
           break
         case "permission.replied": {
-          removePermission(event.properties.sessionID, event.properties.requestID)
+          const requests = store.permission[event.properties.sessionID]
+          if (!requests) break
+          const match = search(requests, event.properties.requestID, (r) => r.id)
+          if (!match.found) break
+          setStore(
+            "permission",
+            event.properties.sessionID,
+            produce((draft) => {
+              draft.splice(match.index, 1)
+            }),
+          )
           break
         }
 
         case "permission.asked": {
           const request = event.properties
+          if (permission.mode === "auto") {
+            void sdk.client.permission.reply({
+              requestID: request.id,
+              reply: "once",
+              directory,
+              workspace,
+            })
+            break
+          }
           const requests = store.permission[request.sessionID]
           if (!requests) {
             setStore("permission", request.sessionID, [request])
@@ -432,20 +453,6 @@ export const {
       }
     })
 
-    function removePermission(sessionID: string, requestID: string) {
-      const requests = store.permission[sessionID]
-      if (!requests) return
-      const match = search(requests, requestID, (request) => request.id)
-      if (!match.found) return
-      setStore(
-        "permission",
-        sessionID,
-        produce((draft) => {
-          draft.splice(match.index, 1)
-        }),
-      )
-    }
-
     const exit = useExit()
     const args = useArgs()
 
@@ -573,9 +580,6 @@ export const {
       },
       get path() {
         return project.instance.path()
-      },
-      permission: {
-        remove: removePermission,
       },
       session: {
         get(sessionID: string) {
