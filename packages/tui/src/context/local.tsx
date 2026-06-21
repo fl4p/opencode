@@ -519,8 +519,19 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       },
     }
 
-    const permission: { mode: PermissionMode } = {
+    const [permissionStore, setPermissionStore] = createStore<{ mode: PermissionMode }>({
       mode: args.yolo ? "auto" : "normal",
+    })
+    const permission = {
+      get mode() {
+        return permissionStore.mode
+      },
+      set(mode: PermissionMode) {
+        setPermissionStore("mode", mode)
+      },
+      toggle() {
+        setPermissionStore("mode", (mode) => (mode === "auto" ? "normal" : "auto"))
+      },
     }
 
     event.on("permission.asked", (evt, metadata) => {
