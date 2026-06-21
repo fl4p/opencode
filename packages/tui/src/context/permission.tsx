@@ -9,7 +9,7 @@ export const { use: usePermission, provider: PermissionProvider } = createSimple
   init: () => {
     const args = useArgs()
     const [store, setStore] = createStore<{ mode: PermissionMode }>({
-      mode: args.yolo ? "auto" : "normal",
+      mode: args.auto ? "auto" : "normal",
     })
     return {
       get mode() {

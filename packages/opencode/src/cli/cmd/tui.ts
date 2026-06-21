@@ -104,7 +104,6 @@ export const TuiThreadCommand = cmd({
         type: "string",
         describe: "agent to use",
       })
-<<<<<<< HEAD
       .option("mini", {
         type: "boolean",
         describe: "start the minimal interactive interface",
@@ -126,7 +125,7 @@ export const TuiThreadCommand = cmd({
         type: "boolean",
         hidden: true,
       })
-      .option("yolo", {
+      .option("auto", {
         alias: ["dangerously-skip-permissions"],
         type: "boolean",
         describe: "auto-approve permissions that are not explicitly denied (dangerous!)",
@@ -279,7 +278,7 @@ export const TuiThreadCommand = cmd({
               model: args.model,
               prompt,
               fork: args.fork,
-              yolo: args.yolo,
+              auto: args.auto,
             },
           }),
         )
