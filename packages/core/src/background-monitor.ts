@@ -1,364 +1,58 @@
-export * as BackgroundMonitorManager from "./background-monitor"
+export * as BackgroundMonitor from "./background-monitor"
 
-import { Cause, Clock, Context, Effect, Exit, Layer, Scope, Stream, SynchronizedRef } from "effect"
-import { ChildProcess } from "effect/unstable/process"
-import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
-import type { ChildProcessHandle } from "effect/unstable/process/ChildProcessSpawner"
-import { Shell } from "./shell"
+// Process-local liveness tracking for the background shell tools (monitor,
+// bash_background). The actual processes now run as BackgroundJob entries; this
+// module only tracks "is something still running for this session" + the child
+// PIDs, as PLAIN functions (no Effect service) so the non-Effect CLI loop in
+// cli/cmd/run.ts can read the count / kill the PIDs SYNCHRONOUSLY — to defer
+// process exit while background work is live and to clean up on SIGINT.
 
-export type Status = "running" | "exited" | "stopped"
+const _sessionCounts = new Map<string, number>()
+const _sessionPids = new Map<string, Array<number>>()
 
-// "monitor" = per-line watcher (Monitor tool); "background" = run-to-exit job (bash_background tool).
-// Tracked so that re-arming a monitor only clears prior monitors, not concurrent background runs.
-export type Kind = "monitor" | "background"
-
-export type Info = {
-  readonly id: string
-  readonly sessionID: string
-  readonly command: string
-  readonly description: string
-  readonly cwd: string
-  readonly status: Status
-  readonly exitReason?: string
-  readonly startedAt: number
-  readonly kind: Kind
-}
-
-export type StartInput = {
-  readonly sessionID: string
-  readonly command: string
-  readonly description: string
-  readonly cwd: string
-  readonly kind?: Kind
-  readonly timeoutMs?: number
-  readonly onEvent: (line: string) => Effect.Effect<void>
-  readonly onExit: (reason: string) => Effect.Effect<void>
-}
-
-export interface Interface {
-  readonly list: () => Effect.Effect<Info[]>
-  readonly get: (id: string) => Effect.Effect<Info | undefined>
-  readonly start: (input: StartInput) => Effect.Effect<Info>
-  readonly stop: (id: string) => Effect.Effect<void>
-  readonly stopAllForSession: (sessionID: string) => Effect.Effect<void>
-  readonly stopAllForSessionByKind: (sessionID: string, kind: Kind) => Effect.Effect<void>
-  readonly stopAll: () => Effect.Effect<void>
-  readonly countForSession: (sessionID: string) => Effect.Effect<number>
-  readonly listForSession: (sessionID: string) => Effect.Effect<Info[]>
-  readonly whenIdleForSession: (sessionID: string, signal?: AbortSignal) => Effect.Effect<void>
-}
-
-export class Service extends Context.Service<Service, Interface>()("@opencode/BackgroundMonitorManager") {}
-
-type ActiveMonitor = {
-  readonly info: Info
-  readonly handle: ChildProcessHandle
-  readonly stdoutBuffer: { buffer: string }
-  readonly intentional: boolean
-  readonly scope: Scope.Closeable
-  readonly onEvent: (line: string) => Effect.Effect<void>
-  readonly onExit: (reason: string) => Effect.Effect<void>
-}
-
-type State = {
-  readonly monitors: Map<string, ActiveMonitor>
-  readonly counter: number
-}
-
-function makeCommand(input: StartInput): ChildProcess.Command {
-  const shell = Shell.acceptable()
-  const args = Shell.args(shell, input.command, input.cwd)
-  return ChildProcess.make(shell, args, {
-    cwd: input.cwd,
-    detached: process.platform !== "win32",
-    env: {
-      ...process.env,
-      TERM: "xterm-256color",
-      PAGER: "cat",
-      GIT_PAGER: "cat",
-    },
-  })
-}
-
-function snapshot(info: Info, status: Status, exitReason?: string): Info {
-  return { ...info, status, exitReason }
-}
-
-function waitForAbort(signal: AbortSignal): Effect.Effect<void> {
-  return Effect.callback<void, never>((resume) => {
-    if (signal.aborted) {
-      resume(Effect.void)
-      return
-    }
-    const onAbort = () => resume(Effect.void)
-    signal.addEventListener("abort", onAbort, { once: true })
-    return Effect.sync(() => signal.removeEventListener("abort", onAbort))
-  })
-}
-
-// Global mutable state for synchronous external access (e.g. CLI keep-alive polling).
-// Updated atomically inside Effect fibers; safe because the map itself is not
-// shared across Effect boundaries, only read from plain JS.
-const _sessionMonitorCounts = new Map<string, number>()
-const _sessionMonitorPids = new Map<string, Array<number>>()
-
+/** Number of live background jobs (monitor + bash_background) for a session. */
 export function getMonitorCount(sessionID: string): number {
-  return _sessionMonitorCounts.get(sessionID) ?? 0
+  return _sessionCounts.get(sessionID) ?? 0
 }
 
+/** Bump the live count for a session (call when a job is armed). */
+export function monitorStarted(sessionID: string): void {
+  _sessionCounts.set(sessionID, (_sessionCounts.get(sessionID) ?? 0) + 1)
+}
+
+/** Drop the live count (and forget the PID) when a job ends. */
+export function monitorStopped(sessionID: string, pid?: number): void {
+  const next = (_sessionCounts.get(sessionID) ?? 0) - 1
+  if (next <= 0) _sessionCounts.delete(sessionID)
+  else _sessionCounts.set(sessionID, next)
+  if (pid !== undefined) removePid(sessionID, pid)
+}
+
+/** Track a child PID so SIGINT can kill it synchronously. */
+export function monitorPid(sessionID: string, pid: number): void {
+  const list = _sessionPids.get(sessionID) ?? []
+  list.push(pid)
+  _sessionPids.set(sessionID, list)
+}
+
+function removePid(sessionID: string, pid: number): void {
+  const list = _sessionPids.get(sessionID)
+  if (!list) return
+  const filtered = list.filter((p) => p !== pid)
+  if (filtered.length === 0) _sessionPids.delete(sessionID)
+  else _sessionPids.set(sessionID, filtered)
+}
+
+/** SIGTERM every tracked PID for a session (CLI SIGINT / shutdown path). */
 export function stopAllForSessionSync(sessionID: string): void {
-  const pids = _sessionMonitorPids.get(sessionID)
+  const pids = _sessionPids.get(sessionID)
   if (!pids) return
   for (const pid of pids) {
     try {
       process.kill(pid, "SIGTERM")
     } catch {
-      // ignore already-exited or permission errors
+      // already-exited or permission errors are fine
     }
   }
-  _sessionMonitorPids.delete(sessionID)
+  _sessionPids.delete(sessionID)
 }
-
-function addPid(sessionID: string, pid: number): void {
-  const list = _sessionMonitorPids.get(sessionID) ?? []
-  list.push(pid)
-  _sessionMonitorPids.set(sessionID, list)
-}
-
-function removePid(sessionID: string, pid: number): void {
-  const list = _sessionMonitorPids.get(sessionID)
-  if (!list) return
-  const filtered = list.filter((p) => p !== pid)
-  if (filtered.length === 0) {
-    _sessionMonitorPids.delete(sessionID)
-  } else {
-    _sessionMonitorPids.set(sessionID, filtered)
-  }
-}
-
-export const make = Effect.gen(function* () {
-  const state = yield* SynchronizedRef.make<State>({ monitors: new Map(), counter: 0 })
-  const scope = yield* Scope.Scope
-  const spawner = yield* ChildProcessSpawner
-
-  const updateCount = (sessionID: string, delta: number) => {
-    const next = (_sessionMonitorCounts.get(sessionID) ?? 0) + delta
-    if (next <= 0) {
-      _sessionMonitorCounts.delete(sessionID)
-    } else {
-      _sessionMonitorCounts.set(sessionID, next)
-    }
-  }
-
-  const deregister = (id: string) =>
-    SynchronizedRef.update(state, (s) => ({
-      ...s,
-      monitors: new Map(Array.from(s.monitors.entries()).filter(([key]) => key !== id)),
-    }))
-
-  const start = Effect.fn("BackgroundMonitorManager.start")(function* (input: StartInput) {
-    const current = yield* SynchronizedRef.get(state)
-    const id = `monitor-${current.counter.toString(36)}`
-    yield* SynchronizedRef.update(state, (s) => ({ ...s, counter: s.counter + 1 }))
-
-    const command = makeCommand(input)
-    const startedAt = yield* Clock.currentTimeMillis
-    const info: Info = {
-      id,
-      sessionID: input.sessionID,
-      command: input.command,
-      description: input.description,
-      cwd: input.cwd,
-      status: "running",
-      startedAt,
-      kind: input.kind ?? "monitor",
-    }
-
-    const monitorScope = yield* Scope.fork(scope, "parallel")
-
-    const handle = yield* spawner
-      .spawn(command)
-      .pipe(Effect.provideService(Scope.Scope, monitorScope))
-      .pipe(
-        Effect.matchCauseEffect({
-          onSuccess: (handle) => Effect.succeed(handle),
-          onFailure: (cause) =>
-            Effect.die(new Error(`Monitor failed to start: ${Cause.squash(cause)}`)),
-        }),
-      )
-
-    const monitor: ActiveMonitor = {
-      info,
-      handle,
-      stdoutBuffer: { buffer: "" },
-      intentional: false,
-      scope: monitorScope,
-      onEvent: input.onEvent,
-      onExit: input.onExit,
-    }
-
-    yield* SynchronizedRef.update(state, (s) => ({
-      ...s,
-      monitors: new Map(s.monitors).set(id, monitor),
-    }))
-    updateCount(input.sessionID, 1)
-    addPid(input.sessionID, Number(handle.pid))
-
-    const processStdout = Effect.fnUntraced(function* () {
-      yield* Stream.runForEach(handle.stdout, (chunk) =>
-        Effect.gen(function* () {
-          const text = new TextDecoder().decode(chunk as Uint8Array)
-          monitor.stdoutBuffer.buffer += text
-          const lines = monitor.stdoutBuffer.buffer.split(/\r?\n/)
-          monitor.stdoutBuffer.buffer = lines.pop() ?? ""
-          for (const line of lines) {
-            const trimmed = line.trim()
-            if (!trimmed) continue
-            yield* input.onEvent(trimmed)
-          }
-        }),
-      )
-    })
-
-    const processExit = Effect.fnUntraced(function* () {
-      const reason = yield* handle.exitCode.pipe(
-        Effect.matchCauseEffect({
-          onSuccess: (code) => Effect.succeed(`exit code ${code}`),
-          onFailure: (cause) => Effect.succeed(`signal or error: ${Cause.squash(cause)}`),
-        }),
-      )
-      yield* SynchronizedRef.update(state, (s) => {
-        const existing = s.monitors.get(id)
-        if (!existing) return s
-        return {
-          ...s,
-          monitors: new Map(s.monitors).set(id, {
-            ...existing,
-            info: snapshot(existing.info, "exited", reason),
-          }),
-        }
-      })
-      const trailing = monitor.stdoutBuffer.buffer.trim()
-      if (trailing) yield* input.onEvent(trailing)
-      if (!monitor.intentional) {
-        yield* input.onExit(reason)
-      }
-      yield* deregister(id)
-      updateCount(input.sessionID, -1)
-      removePid(input.sessionID, Number(handle.pid))
-    })
-
-    yield* processStdout().pipe(Effect.forkIn(monitorScope, { startImmediately: true }))
-    yield* processExit().pipe(Effect.forkIn(monitorScope, { startImmediately: true }))
-
-    if (input.timeoutMs && input.timeoutMs > 0) {
-      yield* Effect.sleep(input.timeoutMs).pipe(
-        Effect.tap(() => stop(id)),
-        Effect.forkIn(monitorScope, { startImmediately: true }),
-      )
-    }
-
-    return info
-  })
-
-  const stop = Effect.fn("BackgroundMonitorManager.stop")(function* (id: string) {
-    const monitor = yield* SynchronizedRef.modify(state, (s): readonly [ActiveMonitor | undefined, State] => {
-      const existing = s.monitors.get(id)
-      if (!existing) return [undefined, s]
-      const updated = { ...existing, intentional: true }
-      return [updated, { ...s, monitors: new Map(s.monitors).set(id, updated) }]
-    })
-    if (!monitor) return
-    yield* monitor.handle.kill().pipe(Effect.ignore)
-    yield* Scope.close(monitor.scope, Exit.void).pipe(Effect.ignore)
-    yield* deregister(id)
-    updateCount(monitor.info.sessionID, -1)
-    removePid(monitor.info.sessionID, Number(monitor.handle.pid))
-  })
-
-  const stopAll = Effect.fn("BackgroundMonitorManager.stopAll")(function* () {
-    const ids = yield* SynchronizedRef.get(state).pipe(Effect.map((s) => Array.from(s.monitors.keys())))
-    yield* Effect.forEach(ids, (id) => stop(id), { concurrency: "unbounded", discard: true })
-  })
-
-  const stopAllForSession = Effect.fn("BackgroundMonitorManager.stopAllForSession")(function* (sessionID: string) {
-    const ids = yield* listForSession(sessionID).pipe(Effect.map((monitors) => monitors.map((m) => m.id)))
-    yield* Effect.forEach(ids, (id) => stop(id), { concurrency: "unbounded", discard: true })
-  })
-
-  const stopAllForSessionByKind = Effect.fn("BackgroundMonitorManager.stopAllForSessionByKind")(function* (
-    sessionID: string,
-    kind: Kind,
-  ) {
-    const ids = yield* listForSession(sessionID).pipe(
-      Effect.map((monitors) => monitors.filter((m) => m.kind === kind).map((m) => m.id)),
-    )
-    yield* Effect.forEach(ids, (id) => stop(id), { concurrency: "unbounded", discard: true })
-  })
-
-  const list = Effect.fn("BackgroundMonitorManager.list")(function* () {
-    return Array.from((yield* SynchronizedRef.get(state)).monitors.values())
-      .map((m) => m.info)
-      .sort((a, b) => a.startedAt - b.startedAt)
-  })
-
-  const get = Effect.fn("BackgroundMonitorManager.get")(function* (id: string) {
-    return (yield* SynchronizedRef.get(state)).monitors.get(id)?.info
-  })
-
-  const countForSession = Effect.fn("BackgroundMonitorManager.countForSession")(function* (sessionID: string) {
-    let count = 0
-    for (const monitor of (yield* SynchronizedRef.get(state)).monitors.values()) {
-      if (monitor.info.sessionID === sessionID) count += 1
-    }
-    return count
-  })
-
-  const listForSession = Effect.fn("BackgroundMonitorManager.listForSession")(function* (sessionID: string) {
-    return Array.from((yield* SynchronizedRef.get(state)).monitors.values())
-      .filter((m) => m.info.sessionID === sessionID)
-      .map((m) => m.info)
-      .sort((a, b) => a.startedAt - b.startedAt)
-  })
-
-  const whenIdleForSession = Effect.fn("BackgroundMonitorManager.whenIdleForSession")(function* (
-    sessionID: string,
-    signal?: AbortSignal,
-  ) {
-    const wait = Effect.fnUntraced(function* () {
-      while (true) {
-        const count = yield* countForSession(sessionID)
-        if (count === 0) return
-        yield* Effect.sleep("100 millis")
-      }
-    })
-    const idle = wait()
-    if (!signal) return yield* idle
-    return yield* idle.pipe(Effect.raceFirst(waitForAbort(signal)))
-  })
-
-  yield* Effect.addFinalizer(
-    Effect.fnUntraced(function* () {
-      yield* stopAll()
-    }),
-  )
-
-  return Service.of({
-    list,
-    get,
-    start,
-    stop,
-    stopAllForSession,
-    stopAllForSessionByKind,
-    stopAll,
-    countForSession,
-    listForSession,
-    whenIdleForSession,
-  })
-})
-
-export const layer = Layer.effect(Service, make)
-
-export const defaultLayer = layer
-
-export * as BackgroundMonitor from "./background-monitor"

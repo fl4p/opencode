@@ -17,7 +17,6 @@ import { BashBackgroundTool } from "../../src/tool/bash-background"
 import { BashBackgroundStopTool } from "../../src/tool/bash-background-stop"
 import { testEffect } from "../lib/effect"
 import { MessageID } from "../../src/session/schema"
-import { BackgroundMonitorManager } from "@/background/monitor"
 import { disposeAllInstances } from "../fixture/fixture"
 
 afterEach(async () => {
@@ -37,7 +36,6 @@ const layer = Layer.mergeAll(
   ToolRegistry.defaultLayer,
   Database.defaultLayer,
   RuntimeFlags.layer({ experimentalBackgroundRun: true }),
-  BackgroundMonitorManager.defaultLayer.pipe(Layer.provide(CrossSpawnSpawner.defaultLayer)),
 ).pipe(Layer.provide(Ripgrep.defaultLayer))
 
 const it = testEffect(layer)

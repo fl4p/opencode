@@ -16,7 +16,6 @@ import { Truncate } from "@/tool/truncate"
 import { MonitorTool } from "../../src/tool/monitor"
 import { testEffect } from "../lib/effect"
 import { MessageID, SessionID } from "../../src/session/schema"
-import { BackgroundMonitorManager } from "@/background/monitor"
 import { disposeAllInstances } from "../fixture/fixture"
 
 afterEach(async () => {
@@ -36,7 +35,6 @@ const layer = Layer.mergeAll(
   ToolRegistry.defaultLayer,
   Database.defaultLayer,
   RuntimeFlags.layer({ experimentalMonitor: true }),
-  BackgroundMonitorManager.defaultLayer.pipe(Layer.provide(CrossSpawnSpawner.defaultLayer)),
 ).pipe(Layer.provide(Ripgrep.defaultLayer))
 
 const it = testEffect(layer)

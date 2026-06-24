@@ -52,7 +52,6 @@ import { Agent } from "../agent/agent"
 import { Skill } from "../skill"
 import { Permission } from "@/permission"
 import { BackgroundJob } from "@/background/job"
-import { BackgroundMonitorManager } from "@/background/monitor"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
@@ -338,7 +337,6 @@ export const defaultLayer = Layer.suspend(() =>
       Layer.provide(Agent.defaultLayer),
       Layer.provide(Session.defaultLayer),
       Layer.provide(BackgroundJob.defaultLayer),
-      Layer.provide(BackgroundMonitorManager.defaultLayer),
       Layer.provide(Provider.defaultLayer),
       Layer.provide(LSP.defaultLayer),
       Layer.provide(Instruction.defaultLayer),
@@ -437,7 +435,6 @@ export const node = LayerNode.make(layer.pipe(Layer.provide(Ripgrep.defaultLayer
   Skill.node,
   Session.node,
   BackgroundJob.node,
-  BackgroundMonitorManager.node,
   Provider.node,
   LSP.node,
   Instruction.node,

@@ -1,20 +1,21 @@
 import * as Tool from "./tool"
-import { BackgroundMonitorManager } from "@/background/monitor"
+import { BackgroundJob } from "@/background/job"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Effect, Schema } from "effect"
+import { TYPE } from "./bash-background"
 
 const id = "bash_background_stop"
 
 export const Parameters = Schema.Struct({
   id: Schema.String.annotate({
-    description: "The background run id returned by bash_background (e.g. \"monitor-3\").",
+    description: "The background run id returned by bash_background.",
   }),
 })
 
 export const BashBackgroundStopTool = Tool.define(
   id,
   Effect.gen(function* () {
-    const manager = yield* BackgroundMonitorManager.Service
+    const jobs = yield* BackgroundJob.Service
     const flags = yield* RuntimeFlags.Service
 
     const run = Effect.fn("BashBackgroundStopTool.execute")(function* (
@@ -27,9 +28,9 @@ export const BashBackgroundStopTool = Tool.define(
         )
       }
 
-      const info = yield* manager.get(params.id)
-      // Only allow stopping a background run that belongs to this session.
-      if (!info || info.sessionID !== ctx.sessionID || info.kind !== "background") {
+      const info = yield* jobs.get(params.id)
+      // Only allow stopping a running bash_background job from this session.
+      if (!info || info.type !== TYPE || info.metadata?.["sessionId"] !== ctx.sessionID || info.status !== "running") {
         return {
           title: params.id,
           metadata: { stopped: false, backgroundId: params.id },
@@ -37,12 +38,13 @@ export const BashBackgroundStopTool = Tool.define(
         }
       }
 
-      yield* manager.stop(params.id)
+      yield* jobs.cancel(params.id)
 
+      const label = info.title ?? (info.metadata?.["description"] as string | undefined) ?? params.id
       return {
-        title: info.description,
+        title: label,
         metadata: { stopped: true, backgroundId: params.id },
-        output: `Stopped background run ${params.id} ("${info.description}").`,
+        output: `Stopped background run ${params.id} ("${label}").`,
       }
     })
 
