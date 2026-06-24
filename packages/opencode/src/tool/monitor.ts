@@ -64,7 +64,9 @@ export const MonitorTool = Tool.define(
       const session = yield* sessions.get(ctx.sessionID).pipe(Effect.orDie)
       const cwd = session.directory
 
-      yield* manager.stopAllForSession(ctx.sessionID)
+      // Re-arming replaces the previous watch, but must NOT kill concurrent
+      // background runs (bash_background) sharing this manager — stop monitors only.
+      yield* manager.stopAllForSessionByKind(ctx.sessionID, "monitor")
 
       const onEvent = Effect.fn("MonitorTool.onEvent")(function* (line: string) {
         yield* ops
@@ -103,6 +105,7 @@ export const MonitorTool = Tool.define(
         command: params.command,
         description: params.description,
         cwd,
+        kind: "monitor",
         timeoutMs: params.timeoutMs,
         onEvent: (line) => onEvent(line),
         onExit: (reason) => onExit(reason),

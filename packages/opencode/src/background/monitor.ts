@@ -29,6 +29,8 @@ export const layer = Layer.effect(
         ),
       stop: (id) => InstanceState.useEffect(state, (m) => m.stop(id)),
       stopAllForSession: (sessionID) => InstanceState.useEffect(state, (m) => m.stopAllForSession(sessionID)),
+      stopAllForSessionByKind: (sessionID, kind) =>
+        InstanceState.useEffect(state, (m) => m.stopAllForSessionByKind(sessionID, kind)),
       stopAll: () => InstanceState.useEffect(state, (m) => m.stopAll()),
       countForSession: (sessionID) => InstanceState.useEffect(state, (m) => m.countForSession(sessionID)),
       listForSession: (sessionID) => InstanceState.useEffect(state, (m) => m.listForSession(sessionID)),

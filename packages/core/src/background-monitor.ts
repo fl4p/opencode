@@ -8,6 +8,10 @@ import { Shell } from "./shell"
 
 export type Status = "running" | "exited" | "stopped"
 
+// "monitor" = per-line watcher (Monitor tool); "background" = run-to-exit job (bash_background tool).
+// Tracked so that re-arming a monitor only clears prior monitors, not concurrent background runs.
+export type Kind = "monitor" | "background"
+
 export type Info = {
   readonly id: string
   readonly sessionID: string
@@ -17,6 +21,7 @@ export type Info = {
   readonly status: Status
   readonly exitReason?: string
   readonly startedAt: number
+  readonly kind: Kind
 }
 
 export type StartInput = {
@@ -24,6 +29,7 @@ export type StartInput = {
   readonly command: string
   readonly description: string
   readonly cwd: string
+  readonly kind?: Kind
   readonly timeoutMs?: number
   readonly onEvent: (line: string) => Effect.Effect<void>
   readonly onExit: (reason: string) => Effect.Effect<void>
@@ -35,6 +41,7 @@ export interface Interface {
   readonly start: (input: StartInput) => Effect.Effect<Info>
   readonly stop: (id: string) => Effect.Effect<void>
   readonly stopAllForSession: (sessionID: string) => Effect.Effect<void>
+  readonly stopAllForSessionByKind: (sessionID: string, kind: Kind) => Effect.Effect<void>
   readonly stopAll: () => Effect.Effect<void>
   readonly countForSession: (sessionID: string) => Effect.Effect<number>
   readonly listForSession: (sessionID: string) => Effect.Effect<Info[]>
@@ -164,6 +171,7 @@ export const make = Effect.gen(function* () {
       cwd: input.cwd,
       status: "running",
       startedAt,
+      kind: input.kind ?? "monitor",
     }
 
     const monitorScope = yield* Scope.fork(scope, "parallel")
@@ -278,6 +286,16 @@ export const make = Effect.gen(function* () {
     yield* Effect.forEach(ids, (id) => stop(id), { concurrency: "unbounded", discard: true })
   })
 
+  const stopAllForSessionByKind = Effect.fn("BackgroundMonitorManager.stopAllForSessionByKind")(function* (
+    sessionID: string,
+    kind: Kind,
+  ) {
+    const ids = yield* listForSession(sessionID).pipe(
+      Effect.map((monitors) => monitors.filter((m) => m.kind === kind).map((m) => m.id)),
+    )
+    yield* Effect.forEach(ids, (id) => stop(id), { concurrency: "unbounded", discard: true })
+  })
+
   const list = Effect.fn("BackgroundMonitorManager.list")(function* () {
     return Array.from((yield* SynchronizedRef.get(state)).monitors.values())
       .map((m) => m.info)
@@ -331,6 +349,7 @@ export const make = Effect.gen(function* () {
     start,
     stop,
     stopAllForSession,
+    stopAllForSessionByKind,
     stopAll,
     countForSession,
     listForSession,

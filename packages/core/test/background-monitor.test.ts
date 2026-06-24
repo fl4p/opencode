@@ -76,4 +76,64 @@ describe("BackgroundMonitorManager", () => {
       expect(count).toBe(0)
     }),
   )
+
+  it.live("stopAllForSessionByKind stops only the matching kind", () =>
+    Effect.gen(function* () {
+      const monitors = yield* BackgroundMonitorManager.Service
+      const sleep = process.platform === "win32" ? "cmd /c timeout /t 30 >nul" : "sleep 30"
+
+      const mon = yield* monitors.start({
+        sessionID: "kind-session",
+        command: sleep,
+        description: "a monitor",
+        cwd: process.cwd(),
+        kind: "monitor",
+        onEvent: () => Effect.void,
+        onExit: () => Effect.void,
+      })
+      const bg = yield* monitors.start({
+        sessionID: "kind-session",
+        command: sleep,
+        description: "a background run",
+        cwd: process.cwd(),
+        kind: "background",
+        onEvent: () => Effect.void,
+        onExit: () => Effect.void,
+      })
+
+      expect(mon.kind).toBe("monitor")
+      expect(bg.kind).toBe("background")
+
+      yield* Effect.sleep("100 millis")
+      expect(yield* monitors.countForSession("kind-session")).toBe(2)
+
+      // Re-arming a monitor must not kill concurrent background runs.
+      yield* monitors.stopAllForSessionByKind("kind-session", "monitor")
+      yield* Effect.sleep("50 millis")
+
+      expect(yield* monitors.countForSession("kind-session")).toBe(1)
+      const stillRunning = yield* monitors.get(bg.id)
+      expect(stillRunning?.status).toBe("running")
+      expect(stillRunning?.kind).toBe("background")
+
+      yield* monitors.stopAllForSession("kind-session")
+      expect(yield* monitors.countForSession("kind-session")).toBe(0)
+    }),
+  )
+
+  it.live("defaults kind to monitor when omitted", () =>
+    Effect.gen(function* () {
+      const monitors = yield* BackgroundMonitorManager.Service
+      const info = yield* monitors.start({
+        sessionID: "default-kind",
+        command: process.platform === "win32" ? "cmd /c timeout /t 30 >nul" : "sleep 30",
+        description: "no kind",
+        cwd: process.cwd(),
+        onEvent: () => Effect.void,
+        onExit: () => Effect.void,
+      })
+      expect(info.kind).toBe("monitor")
+      yield* monitors.stop(info.id)
+    }),
+  )
 })
