@@ -138,6 +138,7 @@ describe("MonitorTool", () => {
     Effect.gen(function* () {
       const { chat, assistant } = yield* seed
       const monitor = yield* runMonitor
+      const jobs = yield* BackgroundJob.Service
       const promptCalls: Array<{ text: string }> = []
       let rearmed = false
 
@@ -161,7 +162,9 @@ describe("MonitorTool", () => {
             promptCalls.push(input.parts[0])
             if (!rearmed && input.parts[0].text.includes("monitor_output")) {
               rearmed = true
-              yield* monitor.execute({ command: "echo 'rearmed-ok'", description: "self-cancel" }, ctx)
+              // B stays running (sleep) so the "exactly one live monitor" assertion
+              // below sees B, not a B that already exited.
+              yield* monitor.execute({ command: "bash -c 'echo rearmed-ok; sleep 5'", description: "self-cancel" }, ctx)
             }
           }),
       }
@@ -188,6 +191,18 @@ describe("MonitorTool", () => {
 
       expect(rearmed).toBe(true)
       expect(promptCalls.some((p) => p.text.includes("rearmed-ok"))).toBe(true)
+
+      // Re-arm must REPLACE: monitor A's job is actually cancelled (not orphaned). Wait
+      // past A's "sleep 2" so a NOT-cancelled A would have emitted "second" — that line
+      // must never appear, and exactly one monitor (B) must remain running. Without this,
+      // an orphan-watcher regression (arm B but never cancel A) would pass on no-hang alone.
+      const aId = result.metadata.monitorId
+      yield* Effect.sleep("2500 millis")
+      const aInfo = yield* jobs.get(aId)
+      expect(aInfo?.status).toBe("cancelled")
+      expect(promptCalls.some((p) => p.text.includes("second"))).toBe(false)
+      const liveMonitors = (yield* jobs.list()).filter((j) => j.type === "monitor" && j.status === "running")
+      expect(liveMonitors.length).toBe(1)
     }),
   )
 

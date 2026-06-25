@@ -23,10 +23,11 @@ export const BackgroundJobsEvent = EventV2.define({
 const BATCH_WINDOW_MS = 200
 // Kill a runaway watcher after this many lines rather than flood the session.
 const FLOOD_MAX_LINES = 5000
-// Byte ceiling on the unterminated-line carry buffer. The line flood guard counts
-// COMPLETE lines, so a watcher spewing bytes with no newline would never trip it and
-// would grow carry without bound. Cap it and treat an over-long partial line as flood.
-const CARRY_MAX_BYTES = 1_000_000
+// Ceiling (in JS string chars) on the unterminated-line carry buffer. The line flood
+// guard counts COMPLETE lines, so a watcher spewing bytes with no newline would never
+// trip it and would grow carry without bound. Cap it and treat an over-long partial
+// line as flood. (Chars, not bytes: bounds memory to a few MB regardless of encoding.)
+const CARRY_MAX_CHARS = 1_000_000
 
 /** Build a detached login-shell command (same env/flags the old monitor used). */
 export function makeShellCommand(command: string, cwd: string): ChildProcess.Command {
@@ -56,6 +57,12 @@ export function makeShellCommand(command: string, cwd: string): ChildProcess.Com
   return ChildProcess.make(shell, args, {
     cwd,
     detached: process.platform !== "win32",
+    // Discard stderr instead of leaving it a piped-but-undrained stream: the reader
+    // only consumes stdout, so an unread stderr pipe fills (~64KB) and BLOCKS the
+    // watched process. Monitor only watches stdout (the prompt tells callers to 2>&1
+    // if they want stderr); bash_background already redirects the inner cmd's stderr
+    // to its logfile. So "ignore" is correct for both and removes the deadlock.
+    stderr: "ignore",
     env: {
       ...process.env,
       OPENCODE_PARENT_PID: String(process.pid),
@@ -152,6 +159,12 @@ export function runShellJob(opts: {
 
       const onBatch = opts.onBatch
       if (onBatch) {
+        // ONE persistent streaming decoder for the whole stream. A per-chunk
+        // `new TextDecoder().decode(chunk)` corrupts any multi-byte UTF-8 char (emoji,
+        // CJK) split across an OS pipe-read boundary: the trailing partial bytes flush
+        // as U+FFFD and the leading continuation bytes in the next chunk flush as more
+        // U+FFFD. {stream:true} buffers the partial sequence inside the decoder instead.
+        const decoder = new TextDecoder()
         let carry = ""
         let pending: string[] = []
         let total = 0
@@ -184,13 +197,13 @@ export function runShellJob(opts: {
 
         yield* Stream.runForEach(handle.stdout, (chunk) =>
           Effect.gen(function* () {
-            carry += new TextDecoder().decode(chunk as Uint8Array)
-            // Byte flood: an endless partial line (no newline) never produces a
-            // complete line, so the line counter below can't catch it. Cap carry and
-            // treat the overflow as flood — warn (with a truncated head) and kill.
-            if (carry.length > CARRY_MAX_BYTES) {
+            carry += decoder.decode(chunk as Uint8Array, { stream: true })
+            // No-newline flood: an endless partial line never produces a complete line,
+            // so the line counter below can't catch it. Cap carry (in chars) and treat
+            // the overflow as flood — warn (with a truncated head) and kill.
+            if (carry.length > CARRY_MAX_CHARS) {
               yield* emit([
-                `[flood guard] watcher stopped: ${carry.length} bytes with no newline. head: ${carry.slice(0, 200)}`,
+                `[flood guard] watcher stopped: ${carry.length} chars with no newline. head: ${carry.slice(0, 200)}`,
               ])
               return yield* Effect.interrupt
             }
@@ -220,10 +233,12 @@ export function runShellJob(opts: {
           }),
         )
 
-        // Process exited: deliver any buffered lines (incl. a trailing partial).
-        // emit() forks into wakeScope (session-lifetime), so this trailing batch
-        // survives the job-scope close that follows exit — and the model may safely
-        // re-arm on the exit note without the exit-then-rearm self-cancel deadlock.
+        // Process exited: flush the streaming decoder (emits U+FFFD only for a genuinely
+        // truncated final sequence) and deliver any buffered lines (incl. a trailing
+        // partial). emit() forks into wakeScope (session-lifetime), so this trailing
+        // batch survives the job-scope close that follows exit — and the model may
+        // safely re-arm on the exit note without the exit-then-rearm self-cancel deadlock.
+        carry += decoder.decode()
         const tail = carry.trim()
         if (tail) pending.push(tail)
         if (pending.length > 0) {
