@@ -76,11 +76,18 @@ export const MonitorTool = Tool.define(
 
       const session = yield* sessions.get(ctx.sessionID).pipe(Effect.orDie)
 
-      // Re-arming replaces the previous watch — cancel only prior MONITOR jobs
-      // for this session (leave any other background jobs running).
+      // Distinct descriptions are distinct, CONCURRENT monitors (so you can watch a local
+      // file AND a remote/SSH log that can't share one `tail`). Re-arming with the SAME
+      // description REPLACES only that specific watch — cancel just the same-description
+      // monitor(s) for this session; leave the others (and other background jobs) running.
       const existing = yield* jobs.list()
       yield* Effect.forEach(
-        existing.filter((j) => j.type === TYPE && j.metadata?.["sessionId"] === ctx.sessionID),
+        existing.filter(
+          (j) =>
+            j.type === TYPE &&
+            j.metadata?.["sessionId"] === ctx.sessionID &&
+            j.metadata?.["description"] === params.description,
+        ),
         (j) => jobs.cancel(j.id),
         { concurrency: "unbounded", discard: true },
       )
