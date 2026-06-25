@@ -161,7 +161,7 @@ export const MonitorTool = Tool.define(
         output:
           `Monitor armed (${info.id}) for "${params.description}". Events will arrive as new messages. ` +
           `To REPLACE this watch (e.g. fix a path), re-arm with the SAME description; a different description ` +
-          `starts a SECOND concurrent monitor. To stop it, use monitor_stop with id ${info.id} or this description.`,
+          `starts a SECOND concurrent monitor. To stop it, use background_stop with id ${info.id} or this description.`,
       }
     })
 

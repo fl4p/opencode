@@ -163,7 +163,7 @@ export const BashBackgroundTool = Tool.define(
         output:
           `Background run armed (${info.id}) for "${params.description}". ` +
           `Output streaming to ${logPath}. You will be notified when it exits; ` +
-          `read the logfile to check progress, or stop it with bash_background_stop (id: ${info.id}).`,
+          `read the logfile to check progress, or stop it with background_stop (id: ${info.id}).`,
       }
     })
 

@@ -15,7 +15,7 @@ import { SessionStatus } from "@/session/status"
 import { ToolRegistry } from "@/tool/registry"
 import { Truncate } from "@/tool/truncate"
 import { BashBackgroundTool } from "../../src/tool/bash-background"
-import { BashBackgroundStopTool } from "../../src/tool/bash-background-stop"
+import { BackgroundStopTool } from "../../src/tool/background-stop"
 import { testEffect } from "../lib/effect"
 import { MessageID } from "../../src/session/schema"
 import { disposeAllInstances } from "../fixture/fixture"
@@ -129,11 +129,11 @@ describe("BashBackgroundTool", () => {
     }),
   )
 
-  it.instance("bash_background_stop tree-kills a running background run", () =>
+  it.instance("background_stop tree-kills a running background run", () =>
     Effect.gen(function* () {
       const { chat, assistant } = yield* seed
       const tool = yield* runTool
-      const stopInfo = yield* BashBackgroundStopTool
+      const stopInfo = yield* BackgroundStopTool
       const stopTool = yield* stopInfo.init()
 
       const ctx = {
@@ -175,7 +175,7 @@ describe("BashBackgroundTool", () => {
     Effect.gen(function* () {
       const { chat, assistant } = yield* seed
       const tool = yield* runTool
-      const stopInfo = yield* BashBackgroundStopTool
+      const stopInfo = yield* BackgroundStopTool
       const stopTool = yield* stopInfo.init()
       const bridge = yield* EventV2Bridge.Service
 
