@@ -495,6 +495,112 @@ describe("MonitorTool", () => {
       expect((miss.metadata as { stopped: boolean }).stopped).toBe(false)
     }),
   )
+
+  // The exact leak fab hit: "correcting" a watch by RE-WORDING its description (/pv -> ~/pv)
+  // does NOT replace the old monitor (dedup is by description) — both run, so a typo'd
+  // tail -F (which never exits) lingers. background_stop is the explicit cleanup.
+  it.instance("a reworded re-arm does NOT replace the old monitor; background_stop retires the stale one", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed
+      const monitor = yield* runMonitor
+      const backgroundStop = yield* runBackgroundStop
+      const jobs = yield* BackgroundJob.Service
+      const armCtx = {
+        sessionID: chat.id,
+        messageID: assistant.id,
+        agent: "build",
+        abort: new AbortController().signal,
+        extra: { promptOps: { prompt: () => Effect.void } },
+        messages: [],
+        metadata: () => Effect.void,
+        ask: () => Effect.void,
+      }
+      const liveOf = () =>
+        Effect.map(jobs.list(), (l) =>
+          l.filter((j) => j.type === "monitor" && j.status === "running" && j.metadata?.["sessionId"] === chat.id),
+        )
+      const long = "bash -c 'while true; do sleep 1; done'"
+
+      yield* monitor.execute({ command: long, description: "watch /pv/log" }, armCtx)
+      // "Correction" with a DIFFERENT description -> a SECOND monitor, old one stays alive.
+      yield* monitor.execute({ command: long, description: "watch ~/pv/log" }, armCtx)
+      yield* Effect.sleep("200 millis")
+      expect((yield* liveOf()).length).toBe(2)
+
+      // Retire the stale wrong-path watch by its description.
+      const stopped = yield* backgroundStop.execute({ description: "watch /pv/log" }, armCtx)
+      expect((stopped.metadata as { stopped: boolean }).stopped).toBe(true)
+      yield* Effect.sleep("300 millis")
+      const after = yield* liveOf()
+      expect(after.length).toBe(1)
+      expect(after[0]!.metadata?.["description"]).toBe("watch ~/pv/log")
+    }),
+  )
+
+  // No id and no description must be a safe no-op (NOT an accidental stop-all).
+  it.instance("background_stop with neither id nor description is a no-op", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed
+      const monitor = yield* runMonitor
+      const backgroundStop = yield* runBackgroundStop
+      const jobs = yield* BackgroundJob.Service
+      const armCtx = {
+        sessionID: chat.id,
+        messageID: assistant.id,
+        agent: "build",
+        abort: new AbortController().signal,
+        extra: { promptOps: { prompt: () => Effect.void } },
+        messages: [],
+        metadata: () => Effect.void,
+        ask: () => Effect.void,
+      }
+      yield* monitor.execute({ command: "bash -c 'while true; do sleep 1; done'", description: "keep-me" }, armCtx)
+      const res = yield* backgroundStop.execute({}, armCtx)
+      expect((res.metadata as { stopped: boolean; count: number }).stopped).toBe(false)
+      expect((res.metadata as { stopped: boolean; count: number }).count).toBe(0)
+      expect(res.output).toContain("Provide either")
+      yield* Effect.sleep("100 millis")
+      const running = (yield* jobs.list()).filter(
+        (j) => j.type === "monitor" && j.status === "running" && j.metadata?.["sessionId"] === chat.id,
+      )
+      expect(running.length).toBe(1)
+    }),
+  )
+
+  // Description-stop must be SESSION-SCOPED: a same-description monitor in another session
+  // is left alone. A regression dropping the sessionId filter would be invisible to every
+  // single-session test.
+  it.instance("background_stop by description is scoped to the caller's session", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed
+      const sessions = yield* Session.Service
+      const chatB = yield* sessions.create({ title: "MonitorTestB" })
+      const monitor = yield* runMonitor
+      const backgroundStop = yield* runBackgroundStop
+      const jobs = yield* BackgroundJob.Service
+      const ctxFor = (sid: string) => ({
+        sessionID: sid,
+        messageID: assistant.id,
+        agent: "build",
+        abort: new AbortController().signal,
+        extra: { promptOps: { prompt: () => Effect.void } },
+        messages: [],
+        metadata: () => Effect.void,
+        ask: () => Effect.void,
+      })
+      const long = "bash -c 'while true; do sleep 1; done'"
+
+      yield* monitor.execute({ command: long, description: "shared" }, ctxFor(chat.id) as any)
+      yield* monitor.execute({ command: long, description: "shared" }, ctxFor(chatB.id) as any)
+
+      // Stop "shared" from session A only.
+      yield* backgroundStop.execute({ description: "shared" }, ctxFor(chat.id) as any)
+      yield* Effect.sleep("300 millis")
+      const running = (yield* jobs.list()).filter((j) => j.type === "monitor" && j.status === "running")
+      expect(running.length).toBe(1)
+      expect(running[0]!.metadata?.["sessionId"]).toBe(chatB.id)
+    }),
+  )
 })
 
 if (process.env.OPENCODE_LIVE_MONITOR_TEST) {

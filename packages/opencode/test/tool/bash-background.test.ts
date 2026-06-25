@@ -211,4 +211,74 @@ describe("BashBackgroundTool", () => {
       expect(counts.at(-1)).toBe(1)
     }),
   )
+
+  // background_stop must stop a bash_background by DESCRIPTION, not just by id (the merged
+  // tool handles both job types by either handle — this is the cross-type description path).
+  it.instance("background_stop stops a bash_background by description", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed
+      const tool = yield* runTool
+      const stopInfo = yield* BackgroundStopTool
+      const stopTool = yield* stopInfo.init()
+      const jobs = yield* BackgroundJob.Service
+      const ctx = {
+        sessionID: chat.id,
+        messageID: assistant.id,
+        agent: "build",
+        abort: new AbortController().signal,
+        extra: { promptOps: { prompt: () => Effect.void } },
+        messages: [],
+        metadata: () => Effect.void,
+        ask: () => Effect.void,
+      }
+
+      yield* tool.execute({ command: "sleep 30", description: "build watch" }, ctx as any)
+      yield* Effect.sleep("100 millis")
+      const stopped = yield* stopTool.execute({ description: "build watch" }, ctx as any)
+      expect(stopped.metadata.stopped).toBe(true)
+      expect(stopped.output).toContain("Stopped background run")
+      yield* Effect.sleep("100 millis")
+      const running = (yield* jobs.list()).filter(
+        (j) => j.status === "running" && j.metadata?.["sessionId"] === chat.id,
+      )
+      expect(running.length).toBe(0)
+    }),
+  )
+
+  // A description-stop matching MULTIPLE jobs cancels them all and reports the count + ids
+  // (bash_background does not dedup descriptions, so two runs can share one).
+  it.instance("background_stop by description stops all same-description runs and reports the count", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed
+      const tool = yield* runTool
+      const stopInfo = yield* BackgroundStopTool
+      const stopTool = yield* stopInfo.init()
+      const jobs = yield* BackgroundJob.Service
+      const ctx = {
+        sessionID: chat.id,
+        messageID: assistant.id,
+        agent: "build",
+        abort: new AbortController().signal,
+        extra: { promptOps: { prompt: () => Effect.void } },
+        messages: [],
+        metadata: () => Effect.void,
+        ask: () => Effect.void,
+      }
+
+      yield* tool.execute({ command: "sleep 30", description: "dup" }, ctx as any)
+      yield* tool.execute({ command: "sleep 30", description: "dup" }, ctx as any)
+      yield* Effect.sleep("100 millis")
+
+      const stopped = yield* stopTool.execute({ description: "dup" }, ctx as any)
+      expect(stopped.metadata.stopped).toBe(true)
+      expect(stopped.metadata.count).toBe(2)
+      expect((stopped.metadata.ids as string[]).length).toBe(2)
+      expect(stopped.output).toContain("Stopped 2 jobs")
+      yield* Effect.sleep("100 millis")
+      const running = (yield* jobs.list()).filter(
+        (j) => j.status === "running" && j.metadata?.["sessionId"] === chat.id,
+      )
+      expect(running.length).toBe(0)
+    }),
+  )
 })
