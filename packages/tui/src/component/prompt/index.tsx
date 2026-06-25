@@ -157,6 +157,9 @@ export function Prompt(props: PromptProps) {
   const dialog = useDialog()
   const toast = useToast()
   const status = createMemo(() => sync.data.session_status?.[props.sessionID ?? ""] ?? { type: "idle" })
+  // Running monitor/bash_background jobs for this session, fed by the
+  // session.background-jobs event the worker publishes (tool/background-shell.ts).
+  const jobs = createMemo(() => sync.data.background_jobs?.[props.sessionID ?? ""] ?? 0)
   const history = usePromptHistory()
   const stash = usePromptStash()
   const keymap = useOpencodeKeymap()
@@ -1500,6 +1503,14 @@ export function Prompt(props: PromptProps) {
           />
         </box>
         <box width="100%" flexDirection="row" justifyContent="space-between">
+          <Show when={jobs() > 0}>
+            <box marginLeft={1} flexShrink={0} flexDirection="row">
+              <text wrapMode="none">
+                <span style={{ fg: theme.success }}>●</span> {jobs()}{" "}
+                <span style={{ fg: theme.textMuted }}>bg job{jobs() === 1 ? "" : "s"}</span>
+              </text>
+            </box>
+          </Show>
           <Switch>
             <Match when={status().type !== "idle"}>
               <box
