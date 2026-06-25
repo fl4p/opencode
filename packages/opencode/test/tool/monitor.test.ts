@@ -15,6 +15,7 @@ import { SessionStatus } from "@/session/status"
 import { ToolRegistry } from "@/tool/registry"
 import { Truncate } from "@/tool/truncate"
 import { MonitorTool } from "../../src/tool/monitor"
+import { MonitorStopTool } from "../../src/tool/monitor-stop"
 import { testEffect } from "../lib/effect"
 import { MessageID, SessionID } from "../../src/session/schema"
 import { disposeAllInstances } from "../fixture/fixture"
@@ -76,6 +77,12 @@ const seed = Effect.gen(function* () {
 
 const runMonitor = Effect.gen(function* () {
   const info = yield* MonitorTool
+  const tool = yield* info.init()
+  return tool
+})
+
+const runMonitorStop = Effect.gen(function* () {
+  const info = yield* MonitorStopTool
   const tool = yield* info.init()
   return tool
 })
@@ -432,6 +439,60 @@ describe("MonitorTool", () => {
       )
       expect(after.length).toBe(2)
       expect(counts.every((c) => c <= 2)).toBe(true)
+    }),
+  )
+
+  // monitor_stop retires a specific watch by description (the leak we hit: a corrected
+  // re-arm with a DIFFERENT description leaves the old monitor running; monitor_stop is
+  // the explicit way to retire it). Stop by description must drop only that one; the
+  // other monitor keeps running. Also covers stop-by-id.
+  it.instance("monitor_stop retires one watch by description and by id, leaving others running", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed
+      const monitor = yield* runMonitor
+      const monitorStop = yield* runMonitorStop
+      const jobs = yield* BackgroundJob.Service
+
+      const ops = { prompt: () => Effect.void }
+      const armCtx = {
+        sessionID: chat.id,
+        messageID: assistant.id,
+        agent: "build",
+        abort: new AbortController().signal,
+        extra: { promptOps: ops },
+        messages: [],
+        metadata: () => Effect.void,
+        ask: () => Effect.void,
+      }
+      const arm = (description: string) =>
+        monitor.execute({ command: "bash -c 'while true; do sleep 1; done'", description }, armCtx)
+
+      const a = yield* arm("watch-A")
+      yield* arm("watch-B")
+      const liveOf = () =>
+        Effect.map(jobs.list(), (l) =>
+          l.filter((j) => j.type === "monitor" && j.status === "running" && j.metadata?.["sessionId"] === chat.id),
+        )
+      expect((yield* liveOf()).length).toBe(2)
+
+      // Stop by description -> only watch-B gone.
+      const stoppedB = yield* monitorStop.execute({ description: "watch-B" }, armCtx)
+      expect((stoppedB.metadata as { stopped: boolean }).stopped).toBe(true)
+      yield* Effect.sleep("300 millis")
+      const afterB = yield* liveOf()
+      expect(afterB.length).toBe(1)
+      expect(afterB[0]!.metadata?.["description"]).toBe("watch-A")
+
+      // Stop the remaining one by id (the id the arm returned) -> none left.
+      const aId = (a.metadata as { monitorId: string }).monitorId
+      const stoppedA = yield* monitorStop.execute({ id: aId }, armCtx)
+      expect((stoppedA.metadata as { stopped: boolean }).stopped).toBe(true)
+      yield* Effect.sleep("300 millis")
+      expect((yield* liveOf()).length).toBe(0)
+
+      // Stopping a non-existent id is a no-op, not an error.
+      const miss = yield* monitorStop.execute({ id: "job_doesnotexist" }, armCtx)
+      expect((miss.metadata as { stopped: boolean }).stopped).toBe(false)
     }),
   )
 })

@@ -30,6 +30,7 @@ import { LspTool } from "./lsp"
 import * as Truncate from "./truncate"
 import { ApplyPatchTool } from "./apply_patch"
 import { MonitorTool } from "./monitor"
+import { MonitorStopTool } from "./monitor-stop"
 import { BashBackgroundTool } from "./bash-background"
 import { BashBackgroundStopTool } from "./bash-background-stop"
 import { Glob } from "@opencode-ai/core/util/glob"
@@ -100,6 +101,7 @@ export const layer = Layer.effect(
     const lsptool = yield* LspTool
     const plan = yield* PlanExitTool
     const monitor = yield* MonitorTool
+    const monitorstop = yield* MonitorStopTool
     const bashbg = yield* BashBackgroundTool
     const bashbgstop = yield* BashBackgroundStopTool
     const webfetch = yield* WebFetchTool
@@ -219,6 +221,7 @@ export const layer = Layer.effect(
           lsp: Tool.init(lsptool),
           plan: Tool.init(plan),
           monitor: Tool.init(monitor),
+          monitorStop: Tool.init(monitorstop),
           bashBackground: Tool.init(bashbg),
           bashBackgroundStop: Tool.init(bashbgstop),
         })
@@ -242,7 +245,7 @@ export const layer = Layer.effect(
             tool.patch,
             ...(flags.experimentalLspTool ? [tool.lsp] : []),
             ...(flags.experimentalPlanMode && flags.client === "cli" ? [tool.plan] : []),
-            ...(flags.experimentalMonitor ? [tool.monitor] : []),
+            ...(flags.experimentalMonitor ? [tool.monitor, tool.monitorStop] : []),
             ...(flags.experimentalBackgroundRun ? [tool.bashBackground, tool.bashBackgroundStop] : []),
           ],
           task: tool.task,

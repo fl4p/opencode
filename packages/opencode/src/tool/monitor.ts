@@ -10,7 +10,7 @@ import { makeShellCommand, runShellJob, BackgroundJobsEvent } from "./background
 import { EventV2Bridge } from "@/event-v2-bridge"
 
 const id = "monitor"
-const TYPE = "monitor"
+export const TYPE = "monitor"
 
 export const Parameters = Schema.Struct({
   command: Schema.String.annotate({
@@ -158,7 +158,10 @@ export const MonitorTool = Tool.define(
       return {
         title: params.description,
         metadata: { monitor: true, monitorId: info.id, description: params.description },
-        output: `Monitor armed (${info.id}) for "${params.description}". Events will arrive as new messages. Do not re-arm it unless you need a different watch.`,
+        output:
+          `Monitor armed (${info.id}) for "${params.description}". Events will arrive as new messages. ` +
+          `To REPLACE this watch (e.g. fix a path), re-arm with the SAME description; a different description ` +
+          `starts a SECOND concurrent monitor. To stop it, use monitor_stop with id ${info.id} or this description.`,
       }
     })
 
