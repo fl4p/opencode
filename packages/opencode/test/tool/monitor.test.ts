@@ -191,6 +191,59 @@ describe("MonitorTool", () => {
     }),
   )
 
+  // F3: the EXIT-then-rearm variant. The 'Monitor exited' note explicitly invites a
+  // re-arm; if the model does so, it cancels the just-exited job from inside the very
+  // fiber delivering that note. This is a DIFFERENT path from the per-batch self-cancel
+  // (the exit note is emitted by the tool's exit hook, not runShellJob's forked wake),
+  // so it needs its own coverage. Same hard timeout: a hang fails fast.
+  it.instance("re-arming on the 'Monitor exited' note does not deadlock (exit-then-rearm)", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed
+      const monitor = yield* runMonitor
+      const promptCalls: Array<{ text: string }> = []
+      let rearmed = false
+
+      const ctx: any = {
+        sessionID: chat.id,
+        messageID: assistant.id,
+        agent: "build",
+        abort: new AbortController().signal,
+        extra: { promptOps: undefined },
+        messages: [],
+        metadata: () => Effect.void,
+        ask: () => Effect.void,
+      }
+
+      const ops = {
+        prompt: (input: any) =>
+          Effect.gen(function* () {
+            promptCalls.push(input.parts[0])
+            if (!rearmed && input.parts[0].text.includes("Monitor exited")) {
+              rearmed = true
+              yield* monitor.execute({ command: "echo 'rearmed-ok'", description: "exit-rearm" }, ctx)
+            }
+          }),
+      }
+      ctx.extra.promptOps = ops
+
+      // A command that EXITS on its own -> fires the 'Monitor exited' note.
+      const result = yield* monitor.execute(
+        { command: "bash -c 'echo first'", description: "exit-rearm" },
+        ctx,
+      )
+      expect(result.output).toContain("Monitor armed")
+
+      yield* Effect.gen(function* () {
+        while (!promptCalls.some((p) => p.text.includes("rearmed-ok"))) {
+          yield* Effect.sleep("100 millis")
+        }
+      }).pipe(Effect.timeout("8 seconds"))
+
+      expect(rearmed).toBe(true)
+      expect(promptCalls.some((p) => p.text.includes("rearmed-ok"))).toBe(true)
+    }),
+  )
+
   // The footer pill: arming a monitor must publish a session.background-jobs event
   // carrying the live count, so the MAIN-thread TUI footer (which can't read the
   // worker-thread count shim) can render it. This asserts the publish side.

@@ -69,13 +69,15 @@ export const BashBackgroundTool = Tool.define(
       const command = makeShellCommand(`( ${params.command} ) > '${logPath}' 2>&1`, session.directory)
 
       // No per-line events (output goes to the logfile); inject one note on exit.
+      // Exit note via onExit (forked off the run fiber by runShellJob), NOT an inline
+      // Effect.tap: if the model re-arms/cancels on the note, an awaited tap would
+      // self-join this job's run fiber (the exit-then-rearm deadlock).
       const job = runShellJob({
         sessionID: ctx.sessionID,
         command,
         // Publish the live job count so the TUI footer can show it (worker->main bridge).
         onCount: (count) => bridge.publish(BackgroundJobsEvent, { sessionID: ctx.sessionID, count }).pipe(Effect.asVoid),
-      }).pipe(
-        Effect.tap((reason) =>
+        onExit: (reason) =>
           ops
             .prompt({
               sessionID: ctx.sessionID,
@@ -89,9 +91,7 @@ export const BashBackgroundTool = Tool.define(
               ],
             })
             .pipe(Effect.ignore),
-        ),
-        Effect.provideService(ChildProcessSpawner, spawner),
-      )
+      }).pipe(Effect.provideService(ChildProcessSpawner, spawner))
 
       const info = yield* jobs.start({
         type: TYPE,

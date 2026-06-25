@@ -81,6 +81,14 @@ export function runShellJob(opts: {
   // TUI footer consumes). Must be fully-provided (R = never) — build it from an
   // already-resolved EventV2Bridge in the tool, not from ambient services here.
   onCount?: (count: number) => Effect.Effect<void>
+  // Called once with the exit reason when the process exits ON ITS OWN (not on
+  // cancel/teardown — those interrupt the reader before we get here). Delivered as a
+  // forked wake into wakeScope, exactly like onBatch: callers MUST NOT await their own
+  // exit note inline (e.g. Effect.tap on this function's result), because the model
+  // can re-arm on the exit note, and an inline await would run that re-arm's cancel in
+  // THIS run fiber -> self-join deadlock (the exit-then-rearm hang). Routing it here
+  // forks it off the run fiber.
+  onExit?: (reason: string) => Effect.Effect<void>
 }): Effect.Effect<string, unknown, ChildProcessSpawner> {
   return Effect.scoped(
     Effect.gen(function* () {
@@ -92,11 +100,24 @@ export function runShellJob(opts: {
       // interruptible on cancel/teardown. (The model WAKE forks into wakeScope below,
       // for a different reason — see there.)
       const jobScope = yield* Scope.Scope
-      // Session-lifetime scope (provided by BackgroundJob.start). Model wakes fork
-      // into THIS, not jobScope, so cancelling this job (re-arm) can't interrupt a
-      // wake that is itself running the re-arm turn (the self-cancel deadlock). Falls
-      // back to jobScope when run outside start. Reader + debounce timer stay jobScope.
+      // Registry/instance-lifetime scope (provided by BackgroundJob.start; it's the
+      // BackgroundJob state.scope, parent of every job scope). Model wakes fork into
+      // THIS, not jobScope, so cancelling this job (re-arm) can't interrupt a wake that
+      // is itself running the re-arm turn (the self-cancel deadlock). Falls back to
+      // jobScope when run outside start. Reader + debounce timer stay jobScope.
       const wakeScope = (yield* WakeScope) ?? jobScope
+      // Set true the instant this job's scope begins closing (cancel / re-arm /
+      // session teardown). Wakes fork into wakeScope, which OUTLIVES this scope, so
+      // without a guard a debounce flush or trailing batch racing the close could fork
+      // a stale wake AFTER the job is dead (M3), and a wake for a torn-down job could
+      // drive a turn for a gone session (M2 dead-session). The emit guard below checks
+      // this. Added as the LAST jobScope finalizer so it runs FIRST on close.
+      let jobClosing = false
+      // Fork a model wake (onBatch / onExit) into wakeScope, off the run+reader fibers,
+      // so a re-arm triggered from inside the wake can cancel THIS job without a
+      // self-join. Guarded by jobClosing so no wake is forked once the job is torn down.
+      const forkWake = (effect: Effect.Effect<void>) =>
+        jobClosing ? Effect.void : effect.pipe(Effect.forkIn(wakeScope, { startImmediately: true }))
       monitorStarted(opts.sessionID)
       if (opts.onCount) yield* opts.onCount(getMonitorCount(opts.sessionID)).pipe(Effect.catchCause(() => Effect.void))
       let pid: number | undefined
@@ -113,6 +134,9 @@ export function runShellJob(opts: {
       pid = Number(handle.pid)
       monitorPid(opts.sessionID, pid)
       yield* Effect.addFinalizer(() => handle.kill().pipe(Effect.ignore))
+      // Last finalizer added => first to run on close: flip the guard before the
+      // process is killed or the count is decremented, so no late wake escapes.
+      yield* Effect.addFinalizer(() => Effect.sync(() => (jobClosing = true)))
 
       const onBatch = opts.onBatch
       if (onBatch) {
@@ -123,15 +147,19 @@ export function runShellJob(opts: {
 
         // Fire-and-forget (forked, NOT awaited): onBatch calls ops.prompt, which
         // AWAITS the model turn. Forked so the reader never blocks on a turn. We fork
-        // into wakeScope (session-lifetime), NOT jobScope: when the model re-arms a
-        // monitor from inside a wake turn, that cancels THIS job — and if the wake ran
-        // in jobScope, cancel's Scope.close would interrupt+await the very fiber
-        // running the turn that issued the cancel (self-cancel deadlock). wakeScope
-        // outlives the job, so the turn completes; the wake is still reaped on session
-        // teardown (no daemon leak). This also makes the trailing exit batch (below)
-        // survive job-scope close instead of being dropped.
-        const emit = (batch: ReadonlyArray<string>) =>
-          onBatch(batch.join("\n")).pipe(Effect.forkIn(wakeScope, { startImmediately: true }))
+        // into wakeScope (the registry/instance scope), NOT jobScope: when the model
+        // re-arms a monitor from inside a wake turn, that cancels THIS job — and the
+        // wake fiber is a CHILD of the reader fiber, so closing jobScope would
+        // interrupt+await the reader and cascade into its own child (the wake) = a
+        // self-join hang. wakeScope reparents the wake off the reader so the turn
+        // completes. Reaping: Effect.forkIn drops the fiber from wakeScope the instant
+        // it COMPLETES (effect.js:2112), so completed wakes never accumulate; only a
+        // genuinely-hung turn lingers (until instance disposal). The jobClosing guard
+        // stops a wake from being forked once this job is torn down (M2 dead-session /
+        // M3 late-flush); an already-in-flight wake to a vanished session is caught by
+        // ops.prompt + the caller's catchCause. This also delivers the trailing exit
+        // batch (below) reliably instead of dropping it on job-scope close.
+        const emit = (batch: ReadonlyArray<string>) => forkWake(onBatch(batch.join("\n")))
 
         // Flush whatever has accumulated as one batch (one wake).
         const flush = Effect.suspend(() => {
@@ -187,12 +215,17 @@ export function runShellJob(opts: {
         }
       }
 
-      return yield* handle.exitCode.pipe(
+      const reason = yield* handle.exitCode.pipe(
         Effect.matchCause({
           onSuccess: (code) => `exit code ${code}`,
           onFailure: (cause) => `signal or error: ${Cause.squash(cause)}`,
         }),
       )
+      // Exit note as a FORKED wake (off this run fiber) — never an inline await — so a
+      // re-arm on the note can cancel this job without self-joining. We reach here only
+      // on a real exit; cancel/teardown interrupts the reader above before this point.
+      if (opts.onExit) yield* forkWake(opts.onExit(reason))
+      return reason
     }),
   )
 }

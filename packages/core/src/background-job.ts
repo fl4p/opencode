@@ -98,8 +98,8 @@ export interface Interface {
 export class Service extends Context.Service<Service, Interface>()("@opencode/BackgroundJob") {}
 
 /**
- * The registry's own (session/instance-lifetime) scope, made available to each
- * job's `run` effect. A job's scope is a CHILD fork of this (see `start`), and
+ * The registry's own (instance-lifetime) scope, made available to each job's
+ * `run` effect. A job's scope is a CHILD fork of this (see `start`), and
  * `cancel` closes that child — so anything that must OUTLIVE a single job's
  * cancel (notably a model wake that is driving the very turn issuing the cancel,
  * i.e. monitor re-arm) must fork into THIS scope, not the job scope, or it
