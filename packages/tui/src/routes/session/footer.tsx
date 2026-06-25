@@ -17,6 +17,12 @@ export function Footer() {
     if (route.data.type !== "session") return []
     return sync.data.permission[route.data.sessionID] ?? []
   })
+  // Running monitor/bash_background jobs for the active session (fed by the
+  // session.background-jobs event the worker publishes — see tool/background-shell.ts).
+  const jobs = createMemo(() => {
+    if (route.data.type !== "session") return 0
+    return sync.data.background_jobs[route.data.sessionID] ?? 0
+  })
   const directory = useDirectory()
   const connected = useConnected()
 
@@ -51,7 +57,14 @@ export function Footer() {
 
   return (
     <box flexDirection="row" justifyContent="space-between" gap={1} flexShrink={0}>
-      <text fg={theme.textMuted}>{directory()}</text>
+      <box gap={1} flexDirection="row" flexShrink={1}>
+        <text fg={theme.textMuted}>{directory()}</text>
+        <Show when={jobs() > 0}>
+          <text>
+            <span style={{ fg: theme.success }}>●</span> {jobs()} bg job{jobs() === 1 ? "" : "s"}
+          </text>
+        </Show>
+      </box>
       <box gap={2} flexDirection="row" flexShrink={0}>
         <Switch>
           <Match when={store.welcome}>

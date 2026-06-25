@@ -7,7 +7,8 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Global } from "@opencode-ai/core/global"
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
 import { Effect, Schema } from "effect"
-import { makeShellCommand, runShellJob } from "./background-shell"
+import { makeShellCommand, runShellJob, BackgroundJobsEvent } from "./background-shell"
+import { EventV2Bridge } from "@/event-v2-bridge"
 
 const id = "bash_background"
 export const TYPE = "bash_background"
@@ -37,6 +38,7 @@ export const BashBackgroundTool = Tool.define(
     const sessions = yield* Session.Service
     const flags = yield* RuntimeFlags.Service
     const spawner = yield* ChildProcessSpawner
+    const bridge = yield* EventV2Bridge.Service
 
     const run = Effect.fn("BashBackgroundTool.execute")(function* (
       params: Schema.Schema.Type<typeof Parameters>,
@@ -67,7 +69,12 @@ export const BashBackgroundTool = Tool.define(
       const command = makeShellCommand(`( ${params.command} ) > '${logPath}' 2>&1`, session.directory)
 
       // No per-line events (output goes to the logfile); inject one note on exit.
-      const job = runShellJob({ sessionID: ctx.sessionID, command }).pipe(
+      const job = runShellJob({
+        sessionID: ctx.sessionID,
+        command,
+        // Publish the live job count so the TUI footer can show it (worker->main bridge).
+        onCount: (count) => bridge.publish(BackgroundJobsEvent, { sessionID: ctx.sessionID, count }).pipe(Effect.asVoid),
+      }).pipe(
         Effect.tap((reason) =>
           ops
             .prompt({

@@ -1,8 +1,22 @@
-import { Cause, Effect, Scope, Stream } from "effect"
+import { Cause, Effect, Schema, Scope, Stream } from "effect"
 import { ChildProcess } from "effect/unstable/process"
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
 import { Shell } from "@opencode-ai/core/shell"
-import { monitorPid, monitorStarted, monitorStopped } from "@opencode-ai/core/background-monitor"
+import { getMonitorCount, monitorPid, monitorStarted, monitorStopped } from "@opencode-ai/core/background-monitor"
+import { EventV2 } from "@opencode-ai/core/event"
+
+// Live count of running background jobs (monitor + bash_background) for a session.
+// Published so the MAIN-thread TUI footer can render the count: the module-global
+// shim (getMonitorCount/_sessionCounts) lives in the WORKER thread that runs the
+// tools, so the renderer can't read it directly — but the worker forwards every
+// EventV2 to the TUI client, so the count rides across the boundary as an event.
+export const BackgroundJobsEvent = EventV2.define({
+  type: "session.background-jobs",
+  schema: {
+    sessionID: Schema.String,
+    count: Schema.Number,
+  },
+})
 
 // Coalesce lines arriving within this window into one wake (one model turn).
 const BATCH_WINDOW_MS = 200
@@ -56,6 +70,11 @@ export function runShellJob(opts: {
   // Called with a BATCH of stdout lines (joined by "\n") coalesced over a short
   // window. Receiving batches — not single lines — is what bounds wake frequency.
   onBatch?: (batch: string) => Effect.Effect<void>
+  // Called with the live running-job count right after this job is registered and
+  // again right after it ends, so the caller can publish it (e.g. as an EventV2 the
+  // TUI footer consumes). Must be fully-provided (R = never) — build it from an
+  // already-resolved EventV2Bridge in the tool, not from ambient services here.
+  onCount?: (count: number) => Effect.Effect<void>
 }): Effect.Effect<string, unknown, ChildProcessSpawner> {
   return Effect.scoped(
     Effect.gen(function* () {
@@ -68,8 +87,16 @@ export function runShellJob(opts: {
       // still NOT blocking the reader (preserving the re-arm deadlock fix).
       const jobScope = yield* Scope.Scope
       monitorStarted(opts.sessionID)
+      if (opts.onCount) yield* opts.onCount(getMonitorCount(opts.sessionID)).pipe(Effect.ignore)
       let pid: number | undefined
-      yield* Effect.addFinalizer(() => Effect.sync(() => monitorStopped(opts.sessionID, pid)))
+      yield* Effect.addFinalizer(() =>
+        Effect.gen(function* () {
+          monitorStopped(opts.sessionID, pid)
+          // Publish the post-decrement count so the footer clears/updates when this
+          // job ends — even if the session is idle (no other event to ride on).
+          if (opts.onCount) yield* opts.onCount(getMonitorCount(opts.sessionID)).pipe(Effect.ignore)
+        }),
+      )
 
       const handle = yield* spawner.spawn(opts.command)
       pid = Number(handle.pid)
@@ -130,6 +157,12 @@ export function runShellJob(opts: {
         )
 
         // Process exited: deliver any buffered lines (incl. a trailing partial).
+        // Forked (not awaited): awaiting onBatch here would re-introduce the re-arm
+        // deadlock on the exit-then-rearm path (the model can re-arm on the exit note,
+        // cancelling this job while its own fiber awaits that turn). The robust fix is
+        // OPT-1 (owned by the deadlock fix): fork the wake into the SESSION-lifetime
+        // scope so it survives job-scope close AND can't self-cancel — delivering this
+        // trailing batch reliably without the hang.
         const tail = carry.trim()
         if (tail) pending.push(tail)
         if (pending.length > 0) yield* emit(pending)

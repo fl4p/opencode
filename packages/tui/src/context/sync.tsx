@@ -85,6 +85,9 @@ export const {
       session_diff: {
         [sessionID: string]: SnapshotFileDiff[]
       }
+      background_jobs: {
+        [sessionID: string]: number
+      }
       todo: {
         [sessionID: string]: Todo[]
       }
@@ -125,6 +128,7 @@ export const {
       session: [],
       session_status: {},
       session_diff: {},
+      background_jobs: {},
       todo: {},
       message: {},
       part: {},
@@ -296,6 +300,13 @@ export const {
           break
         }
 
+        case "session.background-jobs": {
+          // Running monitor/bash_background count, published by the worker thread so
+          // the main-thread footer can render it (the count shim can't cross threads).
+          const props = event.properties as { sessionID: string; count: number }
+          setStore("background_jobs", props.sessionID, props.count)
+          break
+        }
         case "session.status": {
           setStore("session_status", event.properties.sessionID, event.properties.status)
           break

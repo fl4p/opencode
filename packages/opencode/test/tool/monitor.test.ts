@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { Database } from "@opencode-ai/core/database/database"
-import { Effect, Layer } from "effect"
+import { Effect, Layer, Stream } from "effect"
+import { BackgroundJobsEvent } from "../../src/tool/background-shell"
 import { Agent } from "@/agent/agent"
 import { BackgroundJob } from "@/background/job"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
@@ -122,6 +123,107 @@ describe("MonitorTool", () => {
       expect(promptCalls.length).toBeGreaterThan(0)
       expect(promptCalls.some((p) => p.text.includes("hello"))).toBe(true)
       expect(promptCalls.some((p) => p.text.includes("Monitor exited"))).toBe(true)
+    }),
+  )
+
+  // Regression for the re-arm deadlock. The trigger is SELF-CANCEL: the model is
+  // woken by monitor A's output and, from inside that wake turn, re-arms the
+  // monitor — which cancels A's job. With forkIn(jobScope), A's emit fiber (the
+  // fiber currently running this very ops.prompt) is in the scope cancel() closes,
+  // so cancel -> Scope.close interrupts+awaits the fiber it is running on. If that
+  // self-cancel deadlocks (the original 40-min hang) or silently kills the re-arm,
+  // monitor B never arms and "rearmed" never appears. We give the whole flow a hard
+  // timeout so a hang FAILS fast instead of wedging the suite.
+  it.instance("re-arming from inside a wake turn does not deadlock (self-cancel)", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed
+      const monitor = yield* runMonitor
+      const promptCalls: Array<{ text: string }> = []
+      let rearmed = false
+
+      const ctx: any = {
+        sessionID: chat.id,
+        messageID: assistant.id,
+        agent: "build",
+        abort: new AbortController().signal,
+        extra: { promptOps: undefined },
+        messages: [],
+        metadata: () => Effect.void,
+        ask: () => Effect.void,
+      }
+
+      // On the first real output wake, re-arm from within the wake effect itself.
+      // This effect runs in A's emit fiber (forkIn jobScope), exactly the fiber
+      // cancel()'s Scope.close will interrupt — the worst-case self-cancel.
+      const ops = {
+        prompt: (input: any) =>
+          Effect.gen(function* () {
+            promptCalls.push(input.parts[0])
+            if (!rearmed && input.parts[0].text.includes("monitor_output")) {
+              rearmed = true
+              yield* monitor.execute({ command: "echo 'rearmed-ok'", description: "self-cancel" }, ctx)
+            }
+          }),
+      }
+      ctx.extra.promptOps = ops
+
+      const result = yield* monitor.execute(
+        { command: "bash -c 'echo first; sleep 2; echo second'", description: "self-cancel" },
+        ctx,
+      )
+      expect(result.output).toContain("Monitor armed")
+
+      // Wait for: A emits -> wake re-arms B -> B emits "rearmed-ok". If the
+      // self-cancel deadlocks or aborts the re-arm, B never emits and this assert
+      // is never satisfied; the outer timeout converts the hang into a failure.
+      yield* Effect.gen(function* () {
+        while (!promptCalls.some((p) => p.text.includes("rearmed-ok"))) {
+          yield* Effect.sleep("100 millis")
+        }
+      }).pipe(
+        // On a self-cancel deadlock B never emits rearmed-ok, so this loop never
+        // settles; the timeout converts the hang into a TimeoutException -> test fails.
+        Effect.timeout("8 seconds"),
+      )
+
+      expect(rearmed).toBe(true)
+      expect(promptCalls.some((p) => p.text.includes("rearmed-ok"))).toBe(true)
+    }),
+  )
+
+  // The footer pill: arming a monitor must publish a session.background-jobs event
+  // carrying the live count, so the MAIN-thread TUI footer (which can't read the
+  // worker-thread count shim) can render it. This asserts the publish side.
+  it.instance("publishes a session.background-jobs count event on arm", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed
+      const monitor = yield* runMonitor
+      const bridge = yield* EventV2Bridge.Service
+
+      const counts: number[] = []
+      yield* Stream.runForEach(bridge.subscribe(BackgroundJobsEvent), (e) =>
+        Effect.sync(() => counts.push((e.data as { count: number }).count)),
+      ).pipe(Effect.forkScoped)
+      yield* Effect.sleep("100 millis") // let the subscription attach before we publish
+
+      const ops = { prompt: () => Effect.void }
+      yield* monitor.execute(
+        { command: "bash -c 'while true; do sleep 1; done'", description: "count-test" },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps: ops },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      yield* Effect.sleep("500 millis")
+      // A live monitor must have published count >= 1 for this session.
+      expect(counts.some((c) => c >= 1)).toBe(true)
     }),
   )
 })
