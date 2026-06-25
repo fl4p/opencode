@@ -4,7 +4,7 @@ import { BackgroundJob } from "@/background/job"
 import { Session } from "@/session/session"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
-import { Effect, Schema } from "effect"
+import { Cause, Effect, Schema } from "effect"
 import { makeShellCommand, runShellJob } from "./background-shell"
 
 const id = "monitor"
@@ -70,6 +70,9 @@ export const MonitorTool = Tool.define(
       const command = makeShellCommand(params.command, session.directory)
 
       // Each stdout line wakes the model; a clean process exit injects one final note.
+      // Don't swallow with Effect.ignore: ops.prompt dies (not fails) on error, and a
+      // silently-dropped wake is exactly the "monitor stopped notifying" bug. Log the
+      // cause instead, but stay non-fatal so one bad wake never kills the watcher.
       const emit = (text: string) =>
         ops
           .prompt({
@@ -77,7 +80,11 @@ export const MonitorTool = Tool.define(
             agent: ctx.agent,
             parts: [{ type: "text", synthetic: true, text }],
           })
-          .pipe(Effect.ignore)
+          .pipe(
+            Effect.catchCause((cause) =>
+              Effect.logError(`[Monitor: ${params.description}] wake failed`, { cause: Cause.pretty(cause) }),
+            ),
+          )
 
       const job = runShellJob({
         sessionID: ctx.sessionID,

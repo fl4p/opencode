@@ -816,10 +816,15 @@ export const RunCommand = effectCmd({
             console.error(e)
             process.exitCode = 1
           })
-          process.on("SIGINT", () => {
+          // Tree-kill tracked background children on shutdown. SIGTERM (e.g. tile
+          // close) was previously unhandled, so detached watchers leaked; the
+          // in-child OPENCODE_PARENT_PID watchdog is the backstop for SIGKILL/crash.
+          const onSignal = (code: number) => () => {
             stopAllForSessionSync(sessionID)
-            process.exit(1)
-          })
+            process.exit(code)
+          }
+          process.on("SIGINT", onSignal(1))
+          process.on("SIGTERM", onSignal(143))
 
           async function finish() {
             if (args.attach) return

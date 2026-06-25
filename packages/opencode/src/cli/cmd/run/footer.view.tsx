@@ -459,9 +459,6 @@ export function RunFooterView(props: RunFooterViewProps) {
     }
 
     const items: Array<{ kind: string; key: string; label: string }> = []
-    if (jobs() > 0) {
-      items.push({ kind: "jobs", key: `${jobs()}`, label: jobs() === 1 ? "bg job" : "bg jobs" })
-    }
     if (foregroundSubagents() && backgroundShortcut()) {
       items.push({ kind: "background", key: backgroundShortcut(), label: "background" })
     }
@@ -830,6 +827,16 @@ export function RunFooterView(props: RunFooterViewProps) {
                     <span style={{ fg: modeColor(), bold: true }}>{modeLabel()}</span>
                   </text>
                 </box>
+
+                <Show when={jobs() > 0}>
+                  <box paddingLeft={1} paddingRight={1} backgroundColor="transparent" flexShrink={0}>
+                    <text wrapMode="none" truncate>
+                      <span style={{ fg: theme().success, bold: true }}>●</span>{" "}
+                      <span style={{ fg: theme().text }}>{jobs()}</span>{" "}
+                      <span style={{ fg: theme().muted }}>{jobs() === 1 ? "bg job" : "bg jobs"}</span>
+                    </text>
+                  </box>
+                </Show>
 
                 <box
                   flexDirection="row"

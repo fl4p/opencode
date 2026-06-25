@@ -1,4 +1,4 @@
-import { Cause, Effect, Stream } from "effect"
+import { Cause, Effect, Scope, Stream } from "effect"
 import { ChildProcess } from "effect/unstable/process"
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
 import { Shell } from "@opencode-ai/core/shell"
@@ -12,12 +12,29 @@ const FLOOD_MAX_LINES = 5000
 /** Build a detached login-shell command (same env/flags the old monitor used). */
 export function makeShellCommand(command: string, cwd: string): ChildProcess.Command {
   const shell = Shell.acceptable()
-  const args = Shell.args(shell, command, cwd)
+  // Parent-death watchdog. The child is `detached` (its own process group / session
+  // leader via setsid) so graceful teardown can tree-kill it with `kill -- -pid`.
+  // But on NON-graceful opencode death (SIGKILL / tile-close / crash) no JS finalizer
+  // runs, the child reparents to launchd, and the watcher leaks forever (seen live:
+  // 8-9 day old `while :; ... stat ./f` orphans). Fix: spawn a tiny background guard
+  // that polls opencode's pid (passed in as OPENCODE_PARENT_PID, unambiguous vs $PPID)
+  // and SIGTERMs our own process group once it disappears, bounding orphan life to
+  // ~the poll interval. Must be a SINGLE line: Shell.args runs `eval <JSON.stringify>`,
+  // so a literal newline corrupts into a `\n` token.
+  // The watchdog's stdio is redirected to /dev/null: as a background job it inherits
+  // the command's stdout pipe, and leaving it attached would hold the pipe open so the
+  // reader never sees EOF when a short command exits (hanging exit-notify).
+  const guarded =
+    process.platform === "win32"
+      ? command
+      : `( while kill -0 "$OPENCODE_PARENT_PID" 2>/dev/null; do sleep 2; done; kill -- -$$ 2>/dev/null ) </dev/null >/dev/null 2>&1 & ${command}`
+  const args = Shell.args(shell, guarded, cwd)
   return ChildProcess.make(shell, args, {
     cwd,
     detached: process.platform !== "win32",
     env: {
       ...process.env,
+      OPENCODE_PARENT_PID: String(process.pid),
       TERM: "xterm-256color",
       PAGER: "cat",
       GIT_PAGER: "cat",
@@ -43,6 +60,13 @@ export function runShellJob(opts: {
   return Effect.scoped(
     Effect.gen(function* () {
       const spawner = yield* ChildProcessSpawner
+      // The job's own scope (provided by Effect.scoped). Per-line/batch wakes are
+      // forked into THIS scope, not detached: forkDetach makes daemon fibers that
+      // no scope ever interrupts (proven against the Effect internals), which both
+      // leaks a ref'd debounce timer past teardown (hang) and orphans in-flight
+      // wakes. forkIn(jobScope) keeps them interruptible on cancel/teardown while
+      // still NOT blocking the reader (preserving the re-arm deadlock fix).
+      const jobScope = yield* Scope.Scope
       monitorStarted(opts.sessionID)
       let pid: number | undefined
       yield* Effect.addFinalizer(() => Effect.sync(() => monitorStopped(opts.sessionID, pid)))
@@ -59,12 +83,13 @@ export function runShellJob(opts: {
         let total = 0
         let timerArmed = false
 
-        // Fire-and-forget (detached): onBatch calls ops.prompt, which AWAITS the
-        // model turn. If the reader awaited that, cancelling/re-arming a monitor
-        // (Scope.close from inside the very turn the reader is awaiting) would
-        // deadlock. Detaching keeps the reader interruptible.
+        // Fire-and-forget (forked, NOT awaited): onBatch calls ops.prompt, which
+        // AWAITS the model turn. If the reader awaited that, cancelling/re-arming a
+        // monitor (Scope.close from inside the very turn the reader is awaiting)
+        // would deadlock. Forking into jobScope keeps the reader interruptible AND
+        // ties the wake fiber's lifetime to the job (interrupted on teardown).
         const emit = (batch: ReadonlyArray<string>) =>
-          onBatch(batch.join("\n")).pipe(Effect.forkDetach({ startImmediately: true }))
+          onBatch(batch.join("\n")).pipe(Effect.forkIn(jobScope, { startImmediately: true }))
 
         // Flush whatever has accumulated as one batch (one wake).
         const flush = Effect.suspend(() => {
@@ -99,7 +124,7 @@ export function runShellJob(opts: {
             // Arm a single debounce timer; it flushes everything buffered so far.
             if (pending.length > 0 && !timerArmed) {
               timerArmed = true
-              yield* flush.pipe(Effect.delay(`${BATCH_WINDOW_MS} millis`), Effect.forkDetach({ startImmediately: true }))
+              yield* flush.pipe(Effect.delay(`${BATCH_WINDOW_MS} millis`), Effect.forkIn(jobScope, { startImmediately: true }))
             }
           }),
         )

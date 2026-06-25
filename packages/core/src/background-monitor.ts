@@ -48,10 +48,19 @@ export function stopAllForSessionSync(sessionID: string): void {
   const pids = _sessionPids.get(sessionID)
   if (!pids) return
   for (const pid of pids) {
+    // The child is spawned `detached` (its own process group, pid == group id), so
+    // negate the pid to SIGTERM the WHOLE group — otherwise we'd signal only the
+    // login shell and leak the watcher subshell + its stat/md5/fswatch children.
     try {
-      process.kill(pid, "SIGTERM")
+      if (process.platform === "win32") process.kill(pid, "SIGTERM")
+      else process.kill(-pid, "SIGTERM")
     } catch {
-      // already-exited or permission errors are fine
+      // group already gone — try the bare pid as a fallback, then give up.
+      try {
+        process.kill(pid, "SIGTERM")
+      } catch {
+        // already-exited or permission errors are fine
+      }
     }
   }
   _sessionPids.delete(sessionID)
