@@ -244,6 +244,49 @@ describe("MonitorTool", () => {
     }),
   )
 
+  // Byte-flood guard: the line-based flood cap counts COMPLETE lines, so a watcher
+  // spewing bytes with no newline would grow the carry buffer unbounded and never trip
+  // it. The byte cap must catch that — emit a flood warning and stop.
+  it.instance("stops a watcher that emits bytes with no newline (byte flood)", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed
+      const monitor = yield* runMonitor
+      const promptCalls: Array<{ text: string }> = []
+
+      const ops = {
+        prompt: (input: any) =>
+          Effect.sync(() => {
+            promptCalls.push(input.parts[0])
+          }),
+      }
+
+      // ~2MB of 'x' with NO newline -> carry exceeds CARRY_MAX_BYTES (1MB).
+      const result = yield* monitor.execute(
+        { command: "bash -c 'head -c 2000000 /dev/zero | tr \"\\0\" \"x\"'", description: "byte flood" },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps: ops },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+      expect(result.output).toContain("Monitor armed")
+
+      // Wait for the byte-flood guard to fire its warning.
+      yield* Effect.gen(function* () {
+        while (!promptCalls.some((p) => p.text.includes("no newline"))) {
+          yield* Effect.sleep("100 millis")
+        }
+      }).pipe(Effect.timeout("8 seconds"))
+
+      expect(promptCalls.some((p) => p.text.includes("flood guard") && p.text.includes("no newline"))).toBe(true)
+    }),
+  )
+
   // The footer pill: arming a monitor must publish a session.background-jobs event
   // carrying the live count, so the MAIN-thread TUI footer (which can't read the
   // worker-thread count shim) can render it. This asserts the publish side.

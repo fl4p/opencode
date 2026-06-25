@@ -23,6 +23,10 @@ export const BackgroundJobsEvent = EventV2.define({
 const BATCH_WINDOW_MS = 200
 // Kill a runaway watcher after this many lines rather than flood the session.
 const FLOOD_MAX_LINES = 5000
+// Byte ceiling on the unterminated-line carry buffer. The line flood guard counts
+// COMPLETE lines, so a watcher spewing bytes with no newline would never trip it and
+// would grow carry without bound. Cap it and treat an over-long partial line as flood.
+const CARRY_MAX_BYTES = 1_000_000
 
 /** Build a detached login-shell command (same env/flags the old monitor used). */
 export function makeShellCommand(command: string, cwd: string): ChildProcess.Command {
@@ -173,6 +177,15 @@ export function runShellJob(opts: {
         yield* Stream.runForEach(handle.stdout, (chunk) =>
           Effect.gen(function* () {
             carry += new TextDecoder().decode(chunk as Uint8Array)
+            // Byte flood: an endless partial line (no newline) never produces a
+            // complete line, so the line counter below can't catch it. Cap carry and
+            // treat the overflow as flood — warn (with a truncated head) and kill.
+            if (carry.length > CARRY_MAX_BYTES) {
+              yield* emit([
+                `[flood guard] watcher stopped: ${carry.length} bytes with no newline. head: ${carry.slice(0, 200)}`,
+              ])
+              return yield* Effect.interrupt
+            }
             const lines = carry.split(/\r?\n/)
             carry = lines.pop() ?? ""
             for (const line of lines) {
