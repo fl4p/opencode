@@ -6,7 +6,7 @@ WHEN TO USE WHICH TOOL:
 - One event per occurrence, indefinitely ("tell me every time an ERROR line appears") -> use the `monitor` tool, which wakes you per stdout line.
 
 HOW IT WORKS:
-- Returns immediately with a run id and a logfile path. The command runs until it exits on its own (there is no automatic timeout) or you stop it with background_stop.
+- Returns immediately with a run id and a logfile path. The command runs until it exits on its own (there is no automatic timeout) or you stop it with background_stop. You may run SEVERAL background runs at once — they run in parallel and each notifies independently on exit. Use background_list to see all active runs (and monitors) in this session.
 - You may have SEVERAL background runs going at once (unlike `monitor`, which is one-per-session); each notifies independently on exit.
 - Combined stdout AND stderr are written to the logfile. Read the logfile at any time (with the read tool) to check progress while the command is still running.
 - The logfile is NOT size-capped: a command that writes unbounded output (e.g. `yes`, a tight error loop) can fill the disk. Pick commands with bounded output, or redirect/limit noisy output inside your command.

@@ -16,6 +16,8 @@ import { ToolRegistry } from "@/tool/registry"
 import { Truncate } from "@/tool/truncate"
 import { MonitorTool } from "../../src/tool/monitor"
 import { BackgroundStopTool } from "../../src/tool/background-stop"
+import { BackgroundListTool } from "../../src/tool/background-list"
+import { BashBackgroundTool } from "../../src/tool/bash-background"
 import { testEffect } from "../lib/effect"
 import { MessageID, SessionID } from "../../src/session/schema"
 import { disposeAllInstances } from "../fixture/fixture"
@@ -599,6 +601,76 @@ describe("MonitorTool", () => {
       const running = (yield* jobs.list()).filter((j) => j.type === "monitor" && j.status === "running")
       expect(running.length).toBe(1)
       expect(running[0]!.metadata?.["sessionId"]).toBe(chatB.id)
+    }),
+  )
+})
+
+// background_list spans BOTH tool types, so it needs both feature flags. A dedicated layer
+// here proves the answer to "will list show monitors AND background bash?" — yes, both.
+const bothLayer = Layer.mergeAll(
+  Agent.defaultLayer,
+  BackgroundJob.defaultLayer,
+  EventV2Bridge.defaultLayer,
+  Config.defaultLayer,
+  CrossSpawnSpawner.defaultLayer,
+  Session.defaultLayer,
+  SessionRunState.defaultLayer,
+  SessionStatus.defaultLayer,
+  Truncate.defaultLayer,
+  ToolRegistry.defaultLayer,
+  Database.defaultLayer,
+  RuntimeFlags.layer({ experimentalMonitor: true, experimentalBackgroundRun: true }),
+).pipe(Layer.provide(Ripgrep.defaultLayer))
+const itBoth = testEffect(bothLayer)
+
+describe("background_list", () => {
+  itBoth.instance("lists both a monitor and a background run in one session, with correct kinds", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed
+      const monitor = yield* Effect.flatMap(MonitorTool, (i) => i.init())
+      const bashbg = yield* Effect.flatMap(BashBackgroundTool, (i) => i.init())
+      const list = yield* Effect.flatMap(BackgroundListTool, (i) => i.init())
+      const ctx = {
+        sessionID: chat.id,
+        messageID: assistant.id,
+        agent: "build",
+        abort: new AbortController().signal,
+        extra: { promptOps: { prompt: () => Effect.void } },
+        messages: [],
+        metadata: () => Effect.void,
+        ask: () => Effect.void,
+      }
+
+      yield* monitor.execute({ command: "bash -c 'while true; do sleep 1; done'", description: "watch f" }, ctx as any)
+      yield* bashbg.execute({ command: "sleep 30", description: "build" }, ctx as any)
+      yield* Effect.sleep("150 millis")
+
+      const res = yield* list.execute({}, ctx as any)
+      const meta = res.metadata as { count: number; jobs: Array<{ kind: string; description: string }> }
+      expect(meta.count).toBe(2)
+      expect(meta.jobs.map((j) => j.kind).sort()).toEqual(["background_run", "monitor"])
+      expect(res.output).toContain("[monitor]")
+      expect(res.output).toContain("[background run]")
+    }),
+  )
+
+  itBoth.instance("returns an empty list when nothing is running", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed
+      const list = yield* Effect.flatMap(BackgroundListTool, (i) => i.init())
+      const ctx = {
+        sessionID: chat.id,
+        messageID: assistant.id,
+        agent: "build",
+        abort: new AbortController().signal,
+        extra: { promptOps: { prompt: () => Effect.void } },
+        messages: [],
+        metadata: () => Effect.void,
+        ask: () => Effect.void,
+      }
+      const res = yield* list.execute({}, ctx as any)
+      expect((res.metadata as { count: number }).count).toBe(0)
+      expect(res.output).toContain("No active")
     }),
   )
 })
