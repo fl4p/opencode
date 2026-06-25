@@ -122,22 +122,30 @@ export function runShellJob(opts: {
       // self-join. Guarded by jobClosing so no wake is forked once the job is torn down.
       const forkWake = (effect: Effect.Effect<void>) =>
         jobClosing ? Effect.void : effect.pipe(Effect.forkIn(wakeScope, { startImmediately: true }))
-      monitorStarted(opts.sessionID)
-      if (opts.onCount) yield* opts.onCount(getMonitorCount(opts.sessionID)).pipe(Effect.catchCause(() => Effect.void))
       let pid: number | undefined
-      yield* Effect.addFinalizer(() =>
-        Effect.gen(function* () {
-          monitorStopped(opts.sessionID, pid)
-          // Publish the post-decrement count so the footer clears/updates when this
-          // job ends — even if the session is idle (no other event to ride on).
-          if (opts.onCount) yield* opts.onCount(getMonitorCount(opts.sessionID)).pipe(Effect.catchCause(() => Effect.void))
-        }),
+      // Acquire/release the session count atomically: acquireRelease registers the
+      // release finalizer in the SAME uninterruptible step as the increment, so an
+      // interrupt between "incremented" and "finalizer registered" can't leak the count
+      // (E-MED). The release republishes the post-decrement count so the footer clears
+      // when this job ends — even if the session is otherwise idle.
+      yield* Effect.acquireRelease(
+        Effect.sync(() => monitorStarted(opts.sessionID)),
+        () =>
+          Effect.gen(function* () {
+            monitorStopped(opts.sessionID, pid)
+            if (opts.onCount) yield* opts.onCount(getMonitorCount(opts.sessionID)).pipe(Effect.catchCause(() => Effect.void))
+          }),
       )
+      // Startup publish AFTER the release is wired, so an interrupt here still releases.
+      if (opts.onCount) yield* opts.onCount(getMonitorCount(opts.sessionID)).pipe(Effect.catchCause(() => Effect.void))
 
       const handle = yield* spawner.spawn(opts.command)
       pid = Number(handle.pid)
       monitorPid(opts.sessionID, pid)
-      yield* Effect.addFinalizer(() => handle.kill().pipe(Effect.ignore))
+      // forceKillAfter escalates TERM -> SIGKILL after a grace period so a
+      // TERM-ignoring command can't hang teardown (cancel / re-arm / session delete),
+      // which would otherwise block on scope close (H-HIGH).
+      yield* Effect.addFinalizer(() => handle.kill({ forceKillAfter: "3 seconds" }).pipe(Effect.ignore))
       // Last finalizer added => first to run on close: flip the guard before the
       // process is killed or the count is decremented, so no late wake escapes.
       yield* Effect.addFinalizer(() => Effect.sync(() => (jobClosing = true)))

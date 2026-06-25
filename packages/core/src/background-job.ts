@@ -299,6 +299,9 @@ export const make = Effect.gen(function* () {
           result.sequence,
           Deferred.await(result.previous).pipe(
             Effect.andThen(restore(input.run)),
+            // Same as start(): an extended run forks its wakes into the registry scope,
+            // not the job scope, so it keeps the self-cancel protection.
+            Effect.provideService(WakeScope, state.scope),
             Effect.ensuring(Deferred.succeed(result.tail, undefined)),
           ),
         )
