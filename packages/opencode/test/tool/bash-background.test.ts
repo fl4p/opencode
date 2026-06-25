@@ -1,6 +1,7 @@
 import { afterEach, describe, expect } from "bun:test"
 import { Database } from "@opencode-ai/core/database/database"
-import { Effect, Layer } from "effect"
+import { Effect, Layer, Stream } from "effect"
+import { BackgroundJobsEvent } from "../../src/tool/background-shell"
 import { Agent } from "@/agent/agent"
 import { BackgroundJob } from "@/background/job"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
@@ -163,6 +164,51 @@ describe("BashBackgroundTool", () => {
       // Stopping an unknown id is a no-op with stopped:false.
       const missing = yield* stopTool.execute({ id: "monitor-999" }, ctx as any)
       expect(missing.metadata.stopped).toBe(false)
+    }),
+  )
+
+  // The pill's whole point is an accurate AGGREGATE. bash_background (unlike monitor)
+  // does not cancel peers, so two concurrent runs must drive the count to 2, and
+  // stopping one must drop it to 1 — guarding getMonitorCount inc/dec symmetry across
+  // overlapping runShellJob finalizers.
+  it.instance("aggregates the running-job count across concurrent runs", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed
+      const tool = yield* runTool
+      const stopInfo = yield* BashBackgroundStopTool
+      const stopTool = yield* stopInfo.init()
+      const bridge = yield* EventV2Bridge.Service
+
+      const counts: number[] = []
+      yield* Stream.runForEach(bridge.subscribe(BackgroundJobsEvent), (e) =>
+        Effect.sync(() => counts.push((e.data as { count: number }).count)),
+      ).pipe(Effect.forkScoped)
+      yield* Effect.sleep("100 millis")
+
+      const ctx = {
+        sessionID: chat.id,
+        messageID: assistant.id,
+        agent: "build",
+        abort: new AbortController().signal,
+        extra: { promptOps: { prompt: () => Effect.void } },
+        messages: [],
+        metadata: () => Effect.void,
+        ask: () => Effect.void,
+      }
+
+      const a = yield* tool.execute({ command: "sleep 30", description: "a" }, ctx as any)
+      yield* tool.execute({ command: "sleep 30", description: "b" }, ctx as any)
+
+      yield* Effect.gen(function* () {
+        while (counts.at(-1) !== 2) yield* Effect.sleep("50 millis")
+      }).pipe(Effect.timeout("5 seconds"))
+      expect(counts).toContain(2)
+
+      yield* stopTool.execute({ id: a.metadata.backgroundId as string }, ctx as any)
+      yield* Effect.gen(function* () {
+        while (counts.at(-1) !== 1) yield* Effect.sleep("50 millis")
+      }).pipe(Effect.timeout("5 seconds"))
+      expect(counts.at(-1)).toBe(1)
     }),
   )
 })

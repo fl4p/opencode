@@ -1,4 +1,5 @@
 import path from "path"
+import { readdirSync, statSync, unlinkSync } from "node:fs"
 import * as Tool from "./tool"
 import DESCRIPTION from "./bash-background.txt"
 import { BackgroundJob } from "@/background/job"
@@ -56,11 +57,30 @@ export const BashBackgroundTool = Tool.define(
       yield* ctx.ask({
         permission: id,
         patterns: [params.command],
-        always: ["*"],
+        // Scope "always allow" to THIS command, not "*" — bash_background runs arbitrary
+        // shell; granting "*" once would permanently authorize any future command.
+        always: [params.command],
         metadata: { description: params.description, command: params.command },
       })
 
       const session = yield* sessions.get(ctx.sessionID).pipe(Effect.orDie)
+
+      // Best-effort sweep of stale bg-*.log files. The exit note tells the model to read
+      // the log AFTER exit, so we can't unlink on exit; instead reap logs older than 24h
+      // on each arm so they don't accumulate in the tmp dir forever.
+      yield* Effect.sync(() => {
+        try {
+          const dir = Global.Path.tmp
+          const cutoff = Date.now() - 24 * 60 * 60 * 1000
+          for (const f of readdirSync(dir)) {
+            if (!f.startsWith("bg-") || !f.endsWith(".log")) continue
+            const p = path.join(dir, f)
+            try {
+              if (statSync(p).mtimeMs < cutoff) unlinkSync(p)
+            } catch {}
+          }
+        } catch {}
+      }).pipe(Effect.ignore)
 
       // Capture combined stdout+stderr to a per-call logfile. Keep this a SINGLE
       // line: the shell runs commands via `eval <json>`, so a literal newline
