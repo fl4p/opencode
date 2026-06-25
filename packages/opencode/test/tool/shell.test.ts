@@ -1,12 +1,12 @@
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
-import { describe, expect } from "bun:test"
+import { describe, expect, test } from "bun:test"
 import { Cause, Effect, Exit, Layer } from "effect"
 import type * as Scope from "effect/Scope"
 import os from "os"
 import path from "path"
 import { Config } from "@/config/config"
 import { Shell } from "@opencode-ai/core/shell"
-import { ShellTool } from "../../src/tool/shell"
+import { ShellTool, looksLikePoll, pollHint } from "../../src/tool/shell"
 import { Filesystem } from "@/util/filesystem"
 import { provideInstance, testInstanceStoreLayer, tmpdirScoped } from "../fixture/fixture"
 import type { Permission } from "../../src/permission"
@@ -1191,4 +1191,43 @@ describe("tool.shell truncation", () => {
       }),
     ),
   )
+})
+
+describe("sleep-poll hint", () => {
+  test("detects blocking sleep-poll patterns", () => {
+    // long sleep + peek at a log/endpoint
+    expect(looksLikePoll("sleep 300 && ssh host 'tail -30 /tmp/run.log'")).toBe(true)
+    expect(looksLikePoll("sleep 5m; cat out.log")).toBe(true)
+    expect(looksLikePoll("sleep 30 && curl -s localhost:8080/health")).toBe(true)
+    // sleep loops, regardless of per-iteration duration
+    expect(looksLikePoll("while true; do grep done log && break; sleep 2; done")).toBe(true)
+    expect(looksLikePoll("until test -f ready; do sleep 1; done")).toBe(true)
+  })
+
+  test("ignores benign sleeps and non-polls (low false positives)", () => {
+    expect(looksLikePoll("sleep 1 && npm start")).toBe(false) // short warm-up, no peek
+    expect(looksLikePoll("npm run build")).toBe(false)
+    expect(looksLikePoll("tail -30 /tmp/run.log")).toBe(false) // a one-off peek, no sleep
+    expect(looksLikePoll("sleep 2")).toBe(false) // short, no peek
+    expect(looksLikePoll("git commit -m 'sleep on it'")).toBe(false) // 'sleep' only in a string
+  })
+
+  test("hint only fires when a better tool is enabled, and names the enabled ones", () => {
+    const poll = "sleep 300 && tail -30 /tmp/run.log"
+    // neither flag -> silent (suggesting an unavailable tool would be noise)
+    expect(pollHint(poll, false, false)).toBe("")
+    // monitor only
+    expect(pollHint(poll, true, false)).toContain("`monitor`")
+    expect(pollHint(poll, true, false)).not.toContain("`bash_background`")
+    // background only
+    expect(pollHint(poll, false, true)).toContain("`bash_background`")
+    expect(pollHint(poll, false, true)).not.toContain("`monitor`")
+    // both
+    const both = pollHint(poll, true, true)
+    expect(both).toContain("`monitor`")
+    expect(both).toContain("`bash_background`")
+    expect(both).toContain("<tool_hint>")
+    // a non-poll command never gets a hint, even with flags on
+    expect(pollHint("npm run build", true, true)).toBe("")
+  })
 })
