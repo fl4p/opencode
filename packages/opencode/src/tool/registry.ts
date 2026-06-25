@@ -29,6 +29,10 @@ import { WebSearchTool } from "./websearch"
 import { LspTool } from "./lsp"
 import * as Truncate from "./truncate"
 import { ApplyPatchTool } from "./apply_patch"
+import { MonitorTool } from "./monitor"
+import { BackgroundStopTool } from "./background-stop"
+import { BackgroundListTool } from "./background-list"
+import { BashBackgroundTool } from "./bash-background"
 import { Glob } from "@opencode-ai/core/util/glob"
 import path from "path"
 import { pathToFileURL } from "url"
@@ -96,6 +100,10 @@ export const layer = Layer.effect(
     const todo = yield* TodoWriteTool
     const lsptool = yield* LspTool
     const plan = yield* PlanExitTool
+    const monitor = yield* MonitorTool
+    const bashbg = yield* BashBackgroundTool
+    const backgroundstop = yield* BackgroundStopTool
+    const backgroundlist = yield* BackgroundListTool
     const webfetch = yield* WebFetchTool
     const websearch = yield* WebSearchTool
     const shell = yield* ShellTool
@@ -212,6 +220,10 @@ export const layer = Layer.effect(
           question: Tool.init(question),
           lsp: Tool.init(lsptool),
           plan: Tool.init(plan),
+          monitor: Tool.init(monitor),
+          bashBackground: Tool.init(bashbg),
+          backgroundStop: Tool.init(backgroundstop),
+          backgroundList: Tool.init(backgroundlist),
         })
 
         return {
@@ -233,6 +245,13 @@ export const layer = Layer.effect(
             tool.patch,
             ...(flags.experimentalLspTool ? [tool.lsp] : []),
             ...(flags.experimentalPlanMode && flags.client === "cli" ? [tool.plan] : []),
+            ...(flags.experimentalMonitor ? [tool.monitor] : []),
+            ...(flags.experimentalBackgroundRun ? [tool.bashBackground] : []),
+            // One stop + one list tool for BOTH monitor and bash_background (they share the
+            // BackgroundJob registry; ids are globally unique). Present whenever either is enabled.
+            ...(flags.experimentalMonitor || flags.experimentalBackgroundRun
+              ? [tool.backgroundStop, tool.backgroundList]
+              : []),
           ],
           task: tool.task,
           read: tool.read,

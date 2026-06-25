@@ -242,6 +242,7 @@ export function RunFooterView(props: RunFooterViewProps) {
   const exiting = createMemo(() => props.state().exit > 0)
   const queue = createMemo(() => props.state().queue)
   const usage = createMemo(() => props.state().usage)
+  const jobs = createMemo(() => props.state().jobs)
   const interruptLabel = createMemo(() => {
     if (!interrupt()) {
       return
@@ -826,6 +827,16 @@ export function RunFooterView(props: RunFooterViewProps) {
                     <span style={{ fg: modeColor(), bold: true }}>{modeLabel()}</span>
                   </text>
                 </box>
+
+                <Show when={jobs() > 0}>
+                  <box paddingLeft={1} paddingRight={1} backgroundColor="transparent" flexShrink={0}>
+                    <text wrapMode="none" truncate>
+                      <span style={{ fg: theme().success, bold: true }}>●</span>{" "}
+                      <span style={{ fg: theme().text }}>{jobs()}</span>{" "}
+                      <span style={{ fg: theme().muted }}>{jobs() === 1 ? "bg job" : "bg jobs"}</span>
+                    </text>
+                  </box>
+                </Show>
 
                 <box
                   flexDirection="row"

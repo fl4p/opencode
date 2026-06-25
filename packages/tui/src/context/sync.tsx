@@ -85,6 +85,9 @@ export const {
       session_diff: {
         [sessionID: string]: SnapshotFileDiff[]
       }
+      background_jobs: {
+        [sessionID: string]: number
+      }
       todo: {
         [sessionID: string]: Todo[]
       }
@@ -125,6 +128,7 @@ export const {
       session: [],
       session_status: {},
       session_diff: {},
+      background_jobs: {},
       todo: {},
       message: {},
       part: {},
@@ -166,6 +170,16 @@ export const {
     }
 
     event.subscribe((event, { workspace }) => {
+      // Running monitor/bash_background count, published by the worker thread so the
+      // main-thread footer can render it (the count shim can't cross threads). Handled
+      // before the typed switch with a string compare: this event is defined via
+      // EventV2.define but the generated SDK Event union isn't regenerated yet, so a
+      // typed `case` wouldn't compile. (Upstream follow-up: regen the SDK types.)
+      if ((event.type as string) === "session.background-jobs") {
+        const props = event.properties as { sessionID: string; count: number }
+        setStore("background_jobs", props.sessionID, props.count)
+        return
+      }
       switch (event.type) {
         case "server.instance.disposed":
           void bootstrap()
@@ -433,6 +447,11 @@ export const {
 
     async function bootstrap(input: { fatal?: boolean } = {}) {
       const fatal = input.fatal ?? true
+      // The background-jobs count is worker-thread-local and non-durable with no
+      // re-query endpoint: a non-graceful worker death skips the stop finalizer, so a
+      // stale "● N bg jobs" pill would otherwise stick forever. Clear it on every
+      // (re)bootstrap — surviving jobs re-publish their count, dead ones stay cleared.
+      setStore("background_jobs", reconcile({}))
       const workspace = project.workspace.current()
       const projectPromise = project.sync()
       const sessionListPromise = projectPromise.then(() => listSessions())

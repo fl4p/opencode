@@ -98,6 +98,7 @@ function stubOps(opts?: { onPrompt?: (input: SessionPrompt.PromptInput) => void;
         opts?.onPrompt?.(input)
         return reply(input, opts?.text ?? "done")
       }),
+    wake: () => Effect.void,
   }
 }
 
@@ -313,6 +314,7 @@ describe("tool.task", () => {
             ready.resolve(input)
             return cancelled.promise
           }).pipe(Effect.as(reply(input, "cancelled"))),
+        wake: () => Effect.void,
       }
 
       const fiber = yield* def
@@ -504,6 +506,7 @@ describe("tool.task", () => {
             return reply(input, "background done")
           })
         },
+        wake: () => Effect.void,
       }
 
       const fiber = yield* def

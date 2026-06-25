@@ -90,6 +90,8 @@ export type FooterState = {
   first: boolean
   interrupt: number
   exit: number
+  // Count of running background jobs for the session (monitors + background shells).
+  jobs: number
 }
 
 // A partial update to FooterState. The footer merges this onto the current state.

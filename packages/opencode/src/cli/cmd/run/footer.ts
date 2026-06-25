@@ -25,6 +25,7 @@
 // two-press pattern where the first press shows a hint and the second press
 // within 5 seconds actually fires the action.
 import { CliRenderEvents, type CliRenderer, type KeyEvent, type Renderable, type TreeSitterClient } from "@opentui/core"
+import { getMonitorCount } from "@opencode-ai/core/background-monitor"
 import type { Keymap } from "@opentui/keymap"
 import { render } from "@opentui/solid"
 import { createComponent, createSignal, type Accessor, type Setter } from "solid-js"
@@ -196,6 +197,7 @@ export class RunFooter implements FooterApi {
   private setTheme: Setter<RunTheme>
   private state: Accessor<FooterState>
   private setState: Setter<FooterState>
+  private jobsTimer?: ReturnType<typeof setInterval>
   private view: Accessor<FooterView>
   private setView: Setter<FooterView>
   private subagent: Accessor<FooterSubagentState>
@@ -246,6 +248,7 @@ export class RunFooter implements FooterApi {
       first: options.first,
       interrupt: 0,
       exit: 0,
+      jobs: 0,
     })
     this.state = state
     this.setState = setState
@@ -296,6 +299,16 @@ export class RunFooter implements FooterApi {
     this.renderer.on(CliRenderEvents.THEME_MODE, this.handleThemeRefresh)
     this.renderer.prependInputHandler(this.handleThemeNotification)
     process.on("SIGUSR2", this.handleThemeSignal)
+
+    // Poll the running-background-job count (monitors + background shells) and
+    // surface it in the status line. getMonitorCount is a synchronous process-local
+    // read; we only patch when it changes to avoid needless re-renders. A poll (not
+    // an event) is used because a monitor/background shell can exit while the session
+    // is idle, with no session event to ride on.
+    this.jobsTimer = setInterval(() => {
+      const jobs = getMonitorCount(this.options.sessionID() ?? "")
+      if (jobs !== this.state().jobs) this.patch({ jobs })
+    }, 500)
 
     const footer = this
     void render(
@@ -497,6 +510,7 @@ export class RunFooter implements FooterApi {
           : prev.interrupt,
       exit:
         typeof next.exit === "number" && Number.isFinite(next.exit) ? Math.max(0, Math.floor(next.exit)) : prev.exit,
+      jobs: typeof next.jobs === "number" ? Math.max(0, next.jobs) : prev.jobs,
     }
 
     if (state.phase === "idle") {
@@ -1089,6 +1103,7 @@ export class RunFooter implements FooterApi {
     this.flush()
     this.destroyed = true
     this.notifyClose()
+    if (this.jobsTimer) clearInterval(this.jobsTimer)
     this.clearInterruptTimer()
     this.clearExitTimer()
     this.clearNoticeTimer()

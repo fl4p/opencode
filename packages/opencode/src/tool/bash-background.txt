@@ -1,0 +1,18 @@
+Run a shell command in the BACKGROUND and get notified once when it exits. The tool returns immediately after arming the run; the command keeps running detached, its combined stdout+stderr is captured to a logfile, and you receive a single message when it exits (with the exit code). Use this for long jobs whose RESULT you want — builds, test suites, training runs, long scripts — not for short commands.
+
+WHEN TO USE WHICH TOOL:
+- One result, when it's done ("run the build / test suite and tell me when it finishes") -> THIS tool. One notification on exit.
+- Short command you wait for -> use the normal `bash` tool. Do NOT background something that finishes in a second.
+- One event per occurrence, indefinitely ("tell me every time an ERROR line appears") -> use the `monitor` tool, which wakes you per stdout line.
+
+HOW IT WORKS:
+- Returns immediately with a run id and a logfile path. The command runs until it exits on its own (there is no automatic timeout) or you stop it with background_stop. You may run SEVERAL background runs at once — they run in parallel and each notifies independently on exit. Use background_list to see all active runs (and monitors) in this session.
+- You may have SEVERAL background runs going at once (unlike `monitor`, which is one-per-session); each notifies independently on exit.
+- Combined stdout AND stderr are written to the logfile. Read the logfile at any time (with the read tool) to check progress while the command is still running.
+- The logfile is NOT size-capped: a command that writes unbounded output (e.g. `yes`, a tight error loop) can fill the disk. Pick commands with bounded output, or redirect/limit noisy output inside your command.
+- On exit you get one message: `[Background: <description>] exited (exit code N). Output in <path>.` Then read the logfile for the full output.
+- Do NOT poll. You WILL be woken on exit automatically — so do not `sleep` and `tail` the logfile in the bash tool, do not loop, and do not arm a `monitor` on this logfile (the exit message already covers completion). Arm once, then either go do other work or, if you have nothing else, end your turn and wait for the exit message. A one-off peek with the read tool is fine; a sleep/tail poll loop is not.
+
+Parameters:
+- command: the shell command to run in the background
+- description: short description of what is being run (used in the arm + exit messages)

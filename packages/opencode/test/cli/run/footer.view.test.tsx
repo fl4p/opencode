@@ -147,6 +147,7 @@ function footerState(input: Partial<FooterState> = {}) {
     first: false,
     interrupt: 0,
     exit: 0,
+    jobs: 0,
     ...input,
   })[0]
 }
@@ -914,6 +915,7 @@ test("direct footer shows editable prompts and additional queued work while runn
     first: false,
     interrupt: 0,
     exit: 0,
+    jobs: 0,
   })
   const [view] = createSignal<FooterView>({ type: "prompt" })
   const [subagents] = createSignal<FooterSubagentState>({
@@ -1369,6 +1371,30 @@ test("direct variant panel renders current variant selector", async () => {
     expect(frame).not.toContain("┌")
     expect(frame).not.toContain("┃")
     expectPaletteList(list, 1)
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
+test("direct footer shows running background-job count", async () => {
+  const app = await renderFooter({ state: { phase: "idle", jobs: 2 }, width: 100 })
+
+  try {
+    await app.renderOnce()
+    const frame = app.captureCharFrame()
+    expect(frame).toContain("2")
+    expect(frame).toContain("bg jobs")
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
+test("direct footer hides background-job count when zero", async () => {
+  const app = await renderFooter({ state: { phase: "idle", jobs: 0 }, width: 100 })
+
+  try {
+    await app.renderOnce()
+    expect(app.captureCharFrame()).not.toContain("bg job")
   } finally {
     app.renderer.destroy()
   }

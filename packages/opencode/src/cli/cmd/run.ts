@@ -1,5 +1,6 @@
 import type { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { FSUtil } from "@opencode-ai/core/fs-util"
+import { getMonitorCount, stopAllForSessionSync } from "@opencode-ai/core/background-monitor"
 // CLI entry point for `opencode run` and `opencode --mini`.
 //
 // Handles three modes:
@@ -773,7 +774,8 @@ export const RunCommand = effectCmd({
               event.properties.sessionID === sessionID &&
               event.properties.status.type === "idle"
             ) {
-              break
+              if (getMonitorCount(sessionID) === 0) break
+              continue
             }
 
             if (event.type === "permission.asked") {
@@ -814,10 +816,25 @@ export const RunCommand = effectCmd({
             console.error(e)
             process.exitCode = 1
           })
+          // Tree-kill tracked background children on shutdown. SIGTERM (e.g. tile
+          // close) was previously unhandled, so detached watchers leaked; the
+          // in-child OPENCODE_PARENT_PID watchdog is the backstop for SIGKILL/crash.
+          const onSignal = (code: number) => () => {
+            stopAllForSessionSync(sessionID)
+            process.exit(code)
+          }
+          process.on("SIGINT", onSignal(1))
+          process.on("SIGTERM", onSignal(143))
+
           async function finish() {
             if (args.attach) return
             const error = await completed
             if (error) process.exitCode = 1
+
+            // Keep the process alive while background monitors are active.
+            while (getMonitorCount(sessionID) > 0) {
+              await new Promise((resolve) => setTimeout(resolve, 100))
+            }
           }
 
           if (args.command) {
