@@ -226,6 +226,45 @@ describe("MonitorTool", () => {
       expect(counts.some((c) => c >= 1)).toBe(true)
     }),
   )
+
+  // Guards the stop-finalizer publish: when a monitor exits, count must return to 0 so
+  // the footer pill clears (the "pill won't clear" failure mode). A short command that
+  // exits immediately drives arm(1) -> exit -> finalizer(0).
+  it.instance("publishes count 0 when a monitor exits (clears the pill)", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed
+      const monitor = yield* runMonitor
+      const bridge = yield* EventV2Bridge.Service
+
+      const counts: number[] = []
+      yield* Stream.runForEach(bridge.subscribe(BackgroundJobsEvent), (e) =>
+        Effect.sync(() => counts.push((e.data as { count: number }).count)),
+      ).pipe(Effect.forkScoped)
+      yield* Effect.sleep("100 millis")
+
+      const ops = { prompt: () => Effect.void }
+      yield* monitor.execute(
+        { command: "bash -c 'echo hi'", description: "exit-count" },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps: ops },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      yield* Effect.gen(function* () {
+        while (counts.at(-1) !== 0) yield* Effect.sleep("50 millis")
+      }).pipe(Effect.timeout("5 seconds"))
+
+      expect(counts).toContain(1)
+      expect(counts.at(-1)).toBe(0)
+    }),
+  )
 })
 
 if (process.env.OPENCODE_LIVE_MONITOR_TEST) {

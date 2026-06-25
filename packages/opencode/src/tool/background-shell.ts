@@ -39,10 +39,15 @@ export function makeShellCommand(command: string, cwd: string): ChildProcess.Com
   // The watchdog's stdio is redirected to /dev/null: as a background job it inherits
   // the command's stdout pipe, and leaving it attached would hold the pipe open so the
   // reader never sees EOF when a short command exits (hanging exit-notify).
+  // Guard the watchdog behind a liveness check of the parent at arm time: if
+  // OPENCODE_PARENT_PID is empty/unset (e.g. a dotfile scrubbed env before the eval)
+  // then `kill -0 ""` fails and an UNguarded watchdog would fall straight through to
+  // `kill -- -$$` and reap the job the instant it starts. Only arm when the parent is
+  // actually alive; otherwise just run the command (accept no orphan protection).
   const guarded =
     process.platform === "win32"
       ? command
-      : `( while kill -0 "$OPENCODE_PARENT_PID" 2>/dev/null; do sleep 2; done; kill -- -$$ 2>/dev/null ) </dev/null >/dev/null 2>&1 & ${command}`
+      : `if kill -0 "$OPENCODE_PARENT_PID" 2>/dev/null; then ( while kill -0 "$OPENCODE_PARENT_PID" 2>/dev/null; do sleep 2; done; kill -- -$$ 2>/dev/null ) </dev/null >/dev/null 2>&1 & fi; ${command}`
   const args = Shell.args(shell, guarded, cwd)
   return ChildProcess.make(shell, args, {
     cwd,
@@ -93,14 +98,14 @@ export function runShellJob(opts: {
       // back to jobScope when run outside start. Reader + debounce timer stay jobScope.
       const wakeScope = (yield* WakeScope) ?? jobScope
       monitorStarted(opts.sessionID)
-      if (opts.onCount) yield* opts.onCount(getMonitorCount(opts.sessionID)).pipe(Effect.ignore)
+      if (opts.onCount) yield* opts.onCount(getMonitorCount(opts.sessionID)).pipe(Effect.catchCause(() => Effect.void))
       let pid: number | undefined
       yield* Effect.addFinalizer(() =>
         Effect.gen(function* () {
           monitorStopped(opts.sessionID, pid)
           // Publish the post-decrement count so the footer clears/updates when this
           // job ends — even if the session is idle (no other event to ride on).
-          if (opts.onCount) yield* opts.onCount(getMonitorCount(opts.sessionID)).pipe(Effect.ignore)
+          if (opts.onCount) yield* opts.onCount(getMonitorCount(opts.sessionID)).pipe(Effect.catchCause(() => Effect.void))
         }),
       )
 
@@ -172,7 +177,14 @@ export function runShellJob(opts: {
         // re-arm on the exit note without the exit-then-rearm self-cancel deadlock.
         const tail = carry.trim()
         if (tail) pending.push(tail)
-        if (pending.length > 0) yield* emit(pending)
+        if (pending.length > 0) {
+          // Clear pending + disarm the timer (like flush/flood do) so a debounce timer
+          // that armed on the final chunk and survives to fire can't re-emit this batch.
+          const batch = pending
+          pending = []
+          timerArmed = false
+          yield* emit(batch)
+        }
       }
 
       return yield* handle.exitCode.pipe(

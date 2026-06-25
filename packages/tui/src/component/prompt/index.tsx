@@ -1503,15 +1503,19 @@ export function Prompt(props: PromptProps) {
           />
         </box>
         <box width="100%" flexDirection="row" justifyContent="space-between">
-          <Show when={jobs() > 0}>
-            <box marginLeft={1} flexShrink={0} flexDirection="row">
-              <text wrapMode="none">
-                <span style={{ fg: theme.success }}>●</span> {jobs()}{" "}
-                <span style={{ fg: theme.textMuted }}>bg job{jobs() === 1 ? "" : "s"}</span>
-              </text>
-            </box>
-          </Show>
-          <Switch>
+          {/* Left group: pill + status. Grouping keeps the outer row a 2-child
+              space-between (left | usage) so non-grow status branches stay left-aligned
+              instead of getting centered when the pill is present. */}
+          <box flexDirection="row" flexGrow={1} flexShrink={1} gap={1}>
+            <Show when={jobs() > 0}>
+              <box marginLeft={1} flexShrink={0} flexDirection="row">
+                <text wrapMode="none">
+                  <span style={{ fg: theme.success }}>●</span> {jobs()}{" "}
+                  <span style={{ fg: theme.textMuted }}>bg job{jobs() === 1 ? "" : "s"}</span>
+                </text>
+              </box>
+            </Show>
+            <Switch>
             <Match when={status().type !== "idle"}>
               <box
                 flexDirection="row"
@@ -1643,7 +1647,8 @@ export function Prompt(props: PromptProps) {
               </box>
             </Match>
             <Match when={true}>{props.hint ?? <text />}</Match>
-          </Switch>
+            </Switch>
+          </box>
           <Show when={status().type !== "retry"}>
             <box gap={2} flexDirection="row">
               <Show when={editorContextLabelState() !== "none" ? editorFileLabelDisplay() : undefined}>
