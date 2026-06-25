@@ -376,6 +376,64 @@ describe("MonitorTool", () => {
       expect(counts.at(-1)).toBe(0)
     }),
   )
+
+  // Concurrency: monitors are NOT one-per-session. Two DISTINCT descriptions must run
+  // SIMULTANEOUSLY (watch a local file AND a remote/SSH log that can't share one tail),
+  // so the live count reaches 2. Re-arming the SAME description REPLACES only that watch
+  // (dedup), so the count stays at 2 — it must not stack to 3, and must not collapse to 1.
+  it.instance("runs distinct-description monitors concurrently (count reaches 2, same-desc re-arm stays 2)", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed
+      const monitor = yield* runMonitor
+      const jobs = yield* BackgroundJob.Service
+      const bridge = yield* EventV2Bridge.Service
+
+      const counts: number[] = []
+      yield* Stream.runForEach(bridge.subscribe(BackgroundJobsEvent), (e) =>
+        Effect.sync(() => counts.push((e.data as { count: number }).count)),
+      ).pipe(Effect.forkScoped)
+      yield* Effect.sleep("100 millis")
+
+      const ops = { prompt: () => Effect.void }
+      const ctx = (description: string) => ({
+        command: "bash -c 'while true; do sleep 1; done'",
+        description,
+      })
+      const armCtx = {
+        sessionID: chat.id,
+        messageID: assistant.id,
+        agent: "build",
+        abort: new AbortController().signal,
+        extra: { promptOps: ops },
+        messages: [],
+        metadata: () => Effect.void,
+        ask: () => Effect.void,
+      }
+
+      // Two independent sources -> two concurrent monitors.
+      yield* monitor.execute(ctx("watch-local"), armCtx)
+      yield* monitor.execute(ctx("watch-remote"), armCtx)
+
+      // Count must reach 2 (both live), and exactly 2 monitor jobs are running.
+      yield* Effect.gen(function* () {
+        while (counts.at(-1) !== 2) yield* Effect.sleep("50 millis")
+      }).pipe(Effect.timeout("5 seconds"))
+      const live = (yield* jobs.list()).filter(
+        (j) => j.type === "monitor" && j.status === "running" && j.metadata?.["sessionId"] === chat.id,
+      )
+      expect(live.length).toBe(2)
+      expect(live.map((j) => j.metadata?.["description"]).sort()).toEqual(["watch-local", "watch-remote"])
+
+      // Re-arm the SAME description: replaces just that watch -> still 2, never 3.
+      yield* monitor.execute(ctx("watch-local"), armCtx)
+      yield* Effect.sleep("500 millis")
+      const after = (yield* jobs.list()).filter(
+        (j) => j.type === "monitor" && j.status === "running" && j.metadata?.["sessionId"] === chat.id,
+      )
+      expect(after.length).toBe(2)
+      expect(counts.every((c) => c <= 2)).toBe(true)
+    }),
+  )
 })
 
 if (process.env.OPENCODE_LIVE_MONITOR_TEST) {
