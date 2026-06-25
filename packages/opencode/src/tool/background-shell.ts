@@ -4,6 +4,7 @@ import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner
 import { Shell } from "@opencode-ai/core/shell"
 import { getMonitorCount, monitorPid, monitorStarted, monitorStopped } from "@opencode-ai/core/background-monitor"
 import { EventV2 } from "@opencode-ai/core/event"
+import { WakeScope } from "@opencode-ai/core/background-job"
 
 // Live count of running background jobs (monitor + bash_background) for a session.
 // Published so the MAIN-thread TUI footer can render the count: the module-global
@@ -79,13 +80,18 @@ export function runShellJob(opts: {
   return Effect.scoped(
     Effect.gen(function* () {
       const spawner = yield* ChildProcessSpawner
-      // The job's own scope (provided by Effect.scoped). Per-line/batch wakes are
-      // forked into THIS scope, not detached: forkDetach makes daemon fibers that
-      // no scope ever interrupts (proven against the Effect internals), which both
-      // leaks a ref'd debounce timer past teardown (hang) and orphans in-flight
-      // wakes. forkIn(jobScope) keeps them interruptible on cancel/teardown while
-      // still NOT blocking the reader (preserving the re-arm deadlock fix).
+      // The job's own scope (provided by Effect.scoped). The reader and the debounce
+      // timer fork into THIS — not detached: forkDetach makes daemon fibers no scope
+      // ever interrupts (proven against the Effect internals), leaking a ref'd timer
+      // past teardown (hang) and orphaning in-flight work. job-scoping keeps them
+      // interruptible on cancel/teardown. (The model WAKE forks into wakeScope below,
+      // for a different reason — see there.)
       const jobScope = yield* Scope.Scope
+      // Session-lifetime scope (provided by BackgroundJob.start). Model wakes fork
+      // into THIS, not jobScope, so cancelling this job (re-arm) can't interrupt a
+      // wake that is itself running the re-arm turn (the self-cancel deadlock). Falls
+      // back to jobScope when run outside start. Reader + debounce timer stay jobScope.
+      const wakeScope = (yield* WakeScope) ?? jobScope
       monitorStarted(opts.sessionID)
       if (opts.onCount) yield* opts.onCount(getMonitorCount(opts.sessionID)).pipe(Effect.ignore)
       let pid: number | undefined
@@ -111,12 +117,16 @@ export function runShellJob(opts: {
         let timerArmed = false
 
         // Fire-and-forget (forked, NOT awaited): onBatch calls ops.prompt, which
-        // AWAITS the model turn. If the reader awaited that, cancelling/re-arming a
-        // monitor (Scope.close from inside the very turn the reader is awaiting)
-        // would deadlock. Forking into jobScope keeps the reader interruptible AND
-        // ties the wake fiber's lifetime to the job (interrupted on teardown).
+        // AWAITS the model turn. Forked so the reader never blocks on a turn. We fork
+        // into wakeScope (session-lifetime), NOT jobScope: when the model re-arms a
+        // monitor from inside a wake turn, that cancels THIS job — and if the wake ran
+        // in jobScope, cancel's Scope.close would interrupt+await the very fiber
+        // running the turn that issued the cancel (self-cancel deadlock). wakeScope
+        // outlives the job, so the turn completes; the wake is still reaped on session
+        // teardown (no daemon leak). This also makes the trailing exit batch (below)
+        // survive job-scope close instead of being dropped.
         const emit = (batch: ReadonlyArray<string>) =>
-          onBatch(batch.join("\n")).pipe(Effect.forkIn(jobScope, { startImmediately: true }))
+          onBatch(batch.join("\n")).pipe(Effect.forkIn(wakeScope, { startImmediately: true }))
 
         // Flush whatever has accumulated as one batch (one wake).
         const flush = Effect.suspend(() => {
@@ -157,12 +167,9 @@ export function runShellJob(opts: {
         )
 
         // Process exited: deliver any buffered lines (incl. a trailing partial).
-        // Forked (not awaited): awaiting onBatch here would re-introduce the re-arm
-        // deadlock on the exit-then-rearm path (the model can re-arm on the exit note,
-        // cancelling this job while its own fiber awaits that turn). The robust fix is
-        // OPT-1 (owned by the deadlock fix): fork the wake into the SESSION-lifetime
-        // scope so it survives job-scope close AND can't self-cancel — delivering this
-        // trailing batch reliably without the hang.
+        // emit() forks into wakeScope (session-lifetime), so this trailing batch
+        // survives the job-scope close that follows exit — and the model may safely
+        // re-arm on the exit note without the exit-then-rearm self-cancel deadlock.
         const tail = carry.trim()
         if (tail) pending.push(tail)
         if (pending.length > 0) yield* emit(pending)

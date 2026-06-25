@@ -97,6 +97,19 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/BackgroundJob") {}
 
+/**
+ * The registry's own (session/instance-lifetime) scope, made available to each
+ * job's `run` effect. A job's scope is a CHILD fork of this (see `start`), and
+ * `cancel` closes that child — so anything that must OUTLIVE a single job's
+ * cancel (notably a model wake that is driving the very turn issuing the cancel,
+ * i.e. monitor re-arm) must fork into THIS scope, not the job scope, or it
+ * self-cancels and deadlocks. Defaults to `undefined` so a `run` invoked outside
+ * `start` simply falls back to its own job scope.
+ */
+export const WakeScope = Context.Reference<Scope.Scope | undefined>("@opencode/BackgroundJob/WakeScope", {
+  defaultValue: () => undefined,
+})
+
 function snapshot(job: Active): Info {
   return {
     ...job.info,
@@ -245,7 +258,13 @@ export const make = Effect.gen(function* () {
             id,
             result.token,
             0,
-            restore(input.run).pipe(Effect.ensuring(Deferred.succeed(tail, undefined))),
+            // Expose the registry scope to `run` as WakeScope: long-lived wakes
+            // (model re-arm turns) fork into it instead of the job scope, so a
+            // cancel of THIS job can't interrupt the turn that issued the cancel.
+            restore(input.run).pipe(
+              Effect.provideService(WakeScope, state.scope),
+              Effect.ensuring(Deferred.succeed(tail, undefined)),
+            ),
           )
         return result.info
       }),
