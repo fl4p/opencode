@@ -242,6 +242,7 @@ export function RunFooterView(props: RunFooterViewProps) {
   const exiting = createMemo(() => props.state().exit > 0)
   const queue = createMemo(() => props.state().queue)
   const usage = createMemo(() => props.state().usage)
+  const jobs = createMemo(() => props.state().jobs)
   const interruptLabel = createMemo(() => {
     if (!interrupt()) {
       return
@@ -458,6 +459,9 @@ export function RunFooterView(props: RunFooterViewProps) {
     }
 
     const items: Array<{ kind: string; key: string; label: string }> = []
+    if (jobs() > 0) {
+      items.push({ kind: "jobs", key: `${jobs()}`, label: jobs() === 1 ? "bg job" : "bg jobs" })
+    }
     if (foregroundSubagents() && backgroundShortcut()) {
       items.push({ kind: "background", key: backgroundShortcut(), label: "background" })
     }
