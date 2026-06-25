@@ -123,6 +123,11 @@ const cancelBackgroundJobs = Effect.fn("SessionRunState.cancelBackgroundJobs")(f
   const matches = (job: BackgroundJob.Info) => {
     if (job.status !== "running") return false
     if (cancelled.has(job.id)) return false
+    // monitor / bash_background runs are born background:true to OUTLIVE the turn. A user
+    // interrupt (Esc / abort / pre-undo) cancels the in-flight model turn — it must NOT
+    // also silently kill the user's long-running watch/build (the model isn't even told,
+    // since cancel != exit-note). They are still reaped on session DELETE (session.ts).
+    if (job.metadata?.background === true && (job.type === "monitor" || job.type === "bash_background")) return false
     if (pending.has(job.id)) return true
     if (typeof job.metadata?.sessionId === "string" && pending.has(job.metadata.sessionId)) return true
     return typeof job.metadata?.parentSessionId === "string" && pending.has(job.metadata.parentSessionId)

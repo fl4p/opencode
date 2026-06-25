@@ -1,5 +1,6 @@
 import path from "path"
-import { readdirSync, statSync, unlinkSync } from "node:fs"
+import { readdirSync, statSync, unlinkSync, openSync, closeSync, constants as fsConstants } from "node:fs"
+import { randomBytes } from "node:crypto"
 import * as Tool from "./tool"
 import DESCRIPTION from "./bash-background.txt"
 import { BackgroundJob } from "@/background/job"
@@ -7,7 +8,7 @@ import { Session } from "@/session/session"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Global } from "@opencode-ai/core/global"
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
-import { Effect, Schema } from "effect"
+import { Cause, Effect, Schema } from "effect"
 import { makeShellCommand, runShellJob, BackgroundJobsEvent } from "./background-shell"
 import { EventV2Bridge } from "@/event-v2-bridge"
 
@@ -54,20 +55,38 @@ export const BashBackgroundTool = Tool.define(
         return yield* Effect.die(new Error("bash_background tool requires promptOps in ctx.extra"))
       }
 
+      // description is model-supplied and interpolated outside any fence; single-line +
+      // cap it so it can't forge a bracketed prefix or smuggle newlines into the note.
+      const safeDesc = params.description.replace(/[\r\n]+/g, " ").slice(0, 100)
+
       yield* ctx.ask({
         permission: id,
         patterns: [params.command],
         // Scope "always allow" to THIS command, not "*" — bash_background runs arbitrary
-        // shell; granting "*" once would permanently authorize any future command.
-        always: [params.command],
+        // shell; granting "*" once would permanently authorize any future command. Omit
+        // `always` entirely when the command contains glob metachars (* ?): the permission
+        // matcher treats the stored pattern as a glob, so always:["echo *"] would still
+        // over-grant (matches "echo anything"). Re-prompt those each time instead.
+        always: /[*?]/.test(params.command) ? [] : [params.command],
         metadata: { description: params.description, command: params.command },
       })
 
       const session = yield* sessions.get(ctx.sessionID).pipe(Effect.orDie)
 
+      // Logs of jobs that are STILL running must never be swept (mtime goes stale while a
+      // long quiet job holds the fd; deleting it loses output + breaks the model's Read).
+      const liveLogs = new Set(
+        (yield* jobs.list())
+          .filter((j) => j.status === "running")
+          .map((j) => j.metadata?.["logPath"])
+          .filter((p): p is string => typeof p === "string"),
+      )
+
       // Best-effort sweep of stale bg-*.log files. The exit note tells the model to read
       // the log AFTER exit, so we can't unlink on exit; instead reap logs older than 24h
-      // on each arm so they don't accumulate in the tmp dir forever.
+      // on each arm so they don't accumulate in the tmp dir forever. (Cross-instance is
+      // best-effort: jobs.list only knows THIS instance, so the 24h cutoff is the only
+      // guard against another opencode's quiet-but-live log — acceptably rare.)
       yield* Effect.sync(() => {
         try {
           const dir = Global.Path.tmp
@@ -75,6 +94,7 @@ export const BashBackgroundTool = Tool.define(
           for (const f of readdirSync(dir)) {
             if (!f.startsWith("bg-") || !f.endsWith(".log")) continue
             const p = path.join(dir, f)
+            if (liveLogs.has(p)) continue
             try {
               if (statSync(p).mtimeMs < cutoff) unlinkSync(p)
             } catch {}
@@ -82,10 +102,19 @@ export const BashBackgroundTool = Tool.define(
         } catch {}
       }).pipe(Effect.ignore)
 
-      // Capture combined stdout+stderr to a per-call logfile. Keep this a SINGLE
-      // line: the shell runs commands via `eval <json>`, so a literal newline
+      // Capture combined stdout+stderr to a logfile. Use a RANDOM, unpredictable name
+      // (NOT derived from ctx.callID, which is provider-controlled and could carry quotes
+      // or `../` -> shell-injection / path-escape via the `'${logPath}'` redirect). Pre-
+      // create it 0600 + O_EXCL so a local user can't pre-plant a symlink at the path for
+      // the redirect to clobber, and so captured output isn't world-readable in shared tmp.
+      // Keep the command a SINGLE line: the shell runs `eval <json>`, so a literal newline
       // would be re-escaped to a "\n" token and corrupt the command.
-      const logPath = path.join(Global.Path.tmp, `bg-${ctx.callID ?? ctx.messageID}.log`)
+      const logPath = path.join(Global.Path.tmp, `bg-${randomBytes(12).toString("hex")}.log`)
+      yield* Effect.sync(() => {
+        try {
+          closeSync(openSync(logPath, fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY, 0o600))
+        } catch {}
+      }).pipe(Effect.ignore)
       const command = makeShellCommand(`( ${params.command} ) > '${logPath}' 2>&1`, session.directory)
 
       // No per-line events (output goes to the logfile); inject one note on exit.
@@ -106,11 +135,19 @@ export const BashBackgroundTool = Tool.define(
                 {
                   type: "text",
                   synthetic: true,
-                  text: `[Background: ${params.description}] exited (${reason}). Output in ${logPath}`,
+                  text: `[Background: ${safeDesc}] exited (${reason}). Output in ${logPath}`,
                 },
               ],
             })
-            .pipe(Effect.ignore),
+            // Don't Effect.ignore: a defect from ops.prompt would silently drop the exit
+            // notification. Re-raise routine interrupts, log a real failure (non-fatal).
+            .pipe(
+              Effect.catchCause((cause) =>
+                Cause.hasInterruptsOnly(cause)
+                  ? Effect.interrupt
+                  : Effect.logError(`[Background: ${safeDesc}] exit-note failed`, { cause: Cause.pretty(cause) }),
+              ),
+            ),
       }).pipe(Effect.provideService(ChildProcessSpawner, spawner))
 
       const info = yield* jobs.start({
