@@ -2,6 +2,7 @@ Run a long-lived command in the background and get notified whenever it emits a 
 
 IMPORTANT:
 - The command must keep running and emit ONE line per NEW event. It must not exit immediately.
+- Do NOT monitor a `bash_background` run or its logfile. A background run already wakes you once when it exits — arming a `tail -F` on its logfile is redundant, floods you with its output, and can wedge the session. Use `monitor` only for an INDEPENDENT event source you want per-line; use `bash_background` alone when you just want the result on completion.
 - Emit only on a real change. Never re-print content that has not changed — a loop that re-runs `tail -N`, `cat`, or `tail -5` re-emits the same lines every cycle, so once the watched job stops writing you get the same lines flooding back forever as bogus events. Prefer a streaming watcher that emits each new line exactly once.
 - Do not re-arm the same monitor repeatedly. If you need to change the watch, stop the old one first (or use a different description).
 - If the command exits on its own (e.g., the chosen watcher is not installed), you will get a wake-up message telling you it exited, so you can re-arm with a portable command.

@@ -9,7 +9,7 @@ HOW IT WORKS:
 - Returns immediately with a run id and a logfile path. The command runs until it exits on its own (there is no automatic timeout) or you stop it with bash_background_stop.
 - Combined stdout AND stderr are written to the logfile. Read the logfile at any time (with the read tool) to check progress while the command is still running.
 - On exit you get one message: `[Background: <description>] exited (exit code N). Output in <path>.` Then read the logfile for the full output.
-- Do not poll by re-running this tool. Arm once, then read the logfile or wait for the exit message.
+- Do NOT poll. You WILL be woken on exit automatically — so do not `sleep` and `tail` the logfile in the bash tool, do not loop, and do not arm a `monitor` on this logfile (the exit message already covers completion). Arm once, then either go do other work or, if you have nothing else, end your turn and wait for the exit message. A one-off peek with the read tool is fine; a sleep/tail poll loop is not.
 
 Parameters:
 - command: the shell command to run in the background
