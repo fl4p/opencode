@@ -335,6 +335,41 @@ const parser = lazy(async () => {
   return { bash, ps }
 })
 
+// Read-only "peek" commands that, paired with a long sleep, signal a blocking poll.
+const POLL_PEEK = /\b(tail|cat|head|less|grep|stat|curl|wget)\b/
+const SLEEP_DUR = /\bsleep\s+(\d+(?:\.\d+)?)\s*([smhd]?)\b/
+
+// Detect the blocking sleep-poll anti-pattern: either a sleep LOOP (while/until ... sleep),
+// or a long blocking `sleep` followed by a read-only peek at a log/endpoint. Short sleeps
+// (service warm-up, race avoidance) are deliberately ignored to keep false positives low.
+export function looksLikePoll(command: string): boolean {
+  if (/\b(while|until)\b/.test(command) && /\bsleep\b/.test(command)) return true
+  const m = command.match(SLEEP_DUR)
+  if (m) {
+    const mult: Record<string, number> = { "": 1, s: 1, m: 60, h: 3600, d: 86400 }
+    const secs = parseFloat(m[1]!) * (mult[m[2]!] ?? 1)
+    if (secs >= 10 && POLL_PEEK.test(command)) return true
+  }
+  return false
+}
+
+// Non-blocking nudge appended to the bash result when a poll is detected AND a better tool
+// is actually available. Suggesting tools the model can't use would be noise, so when neither
+// experimental flag is on we stay silent.
+export function pollHint(command: string, monitorOn: boolean, backgroundOn: boolean): string {
+  if (!looksLikePoll(command)) return ""
+  const tools: string[] = []
+  if (backgroundOn) tools.push("`bash_background` (notified once when it exits)")
+  if (monitorOn) tools.push("`monitor` (woken on each new output line)")
+  if (tools.length === 0) return ""
+  return (
+    "\n\n<tool_hint>\nThis looked like a blocking sleep-poll, which freezes your turn doing nothing until it " +
+    "returns. For long-running or wait-then-check work, prefer " +
+    tools.join(" or ") +
+    " — they return immediately and wake you without blocking; `background_list` shows what's active.\n</tool_hint>"
+  )
+}
+
 export const ShellTool = Tool.define(
   ShellID.ToolID,
   Effect.gen(function* () {
@@ -628,7 +663,7 @@ export const ShellTool = Tool.define(
                 }),
               )
 
-              return yield* run(
+              const result = yield* run(
                 {
                   shell,
                   command: params.command,
@@ -638,6 +673,10 @@ export const ShellTool = Tool.define(
                 },
                 ctx,
               )
+              // Soft, non-blocking nudge toward monitor / bash_background when the command
+              // looks like a blocking sleep-poll. Never blocks or rewrites the command.
+              const hint = pollHint(params.command, flags.experimentalMonitor, flags.experimentalBackgroundRun)
+              return hint ? { ...result, output: result.output + hint } : result
             }),
         }
       })
