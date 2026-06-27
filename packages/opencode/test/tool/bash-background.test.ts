@@ -281,4 +281,66 @@ describe("BashBackgroundTool", () => {
       expect(running.length).toBe(0)
     }),
   )
+
+  // END-TO-END: the wake-on-exit channel-watch loop (opencode's analog of Claude
+  // Code's `run_in_background` + `wait`). Arm bash_background on the REAL
+  // channel.py `wait --timeout 0`; it blocks with zero inference, so the run stays
+  // alive. When a peer appends a message, `wait` prints it and EXITS, which must
+  // fire bash_background's single onExit wake — with the peer message captured in
+  // the logfile. This proves "Wake-on-exit + wait" works end-to-end in opencode.
+  it.instance("wakes on exit when a peer message arrives (channel.py wait loop)", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed
+      const tool = yield* runTool
+      const CHANNEL_PY = "/Users/fab/dev/agent-channel/opencode/channel/scripts/channel.py"
+      const channel = "bgwaittest_" + Date.now()
+      const promptCalls: Array<{ text: string }> = []
+      const ops = { prompt: (input: any) => Effect.sync(() => promptCalls.push(input.parts[0])) }
+      const ctx = {
+        sessionID: chat.id,
+        messageID: assistant.id,
+        agent: "build",
+        abort: new AbortController().signal,
+        extra: { promptOps: ops },
+        messages: [],
+        metadata: () => Effect.void,
+        ask: () => Effect.void,
+      }
+
+      // Start the watcher's cursor at the current (empty) end, like a real join.
+      yield* Effect.promise(() => Bun.spawn(["python3", CHANNEL_PY, "setup", channel, "watcher"]).exited)
+
+      // Arm wake-on-exit: bash_background blocks on `wait` until a peer message.
+      const armed = yield* tool.execute(
+        { command: `python3 ${CHANNEL_PY} wait ${channel} watcher --timeout 0`, description: "watch channel" },
+        ctx as any,
+      )
+      expect(armed.output).toContain("Background run armed")
+      const logPath = armed.metadata.logPath as string
+
+      // It is genuinely blocked — no exit notification yet.
+      yield* Effect.sleep("400 millis")
+      expect(promptCalls.length).toBe(0)
+
+      // A peer posts. `wait` sees the kqueue/inotify event, prints, and exits.
+      yield* Effect.promise(() =>
+        Bun.spawn(["python3", CHANNEL_PY, "send", channel, "peer", "ping from peer"]).exited,
+      )
+
+      // bash_background fires its single wake-on-exit notification.
+      yield* Effect.gen(function* () {
+        while (promptCalls.length === 0) yield* Effect.sleep("50 millis")
+      }).pipe(Effect.timeout("5 seconds"))
+      expect(promptCalls.length).toBe(1)
+      expect(promptCalls[0].text).toContain("exited")
+
+      // The peer message landed in the logfile the wake pointed the agent at.
+      const logged = yield* Effect.promise(() => Bun.file(logPath).text())
+      expect(logged).toContain("[peer] ping from peer")
+
+      // Cleanup the channel artifacts.
+      yield* Effect.promise(() => Bun.spawn(["python3", CHANNEL_PY, "leave", channel, "watcher"]).exited)
+      yield* Effect.promise(() => Bun.spawn(["rm", "-f", `/tmp/claude-channels/${channel}.ndjson`]).exited)
+    }),
+  )
 })

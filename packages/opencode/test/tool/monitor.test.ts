@@ -603,6 +603,76 @@ describe("MonitorTool", () => {
       expect(running[0]!.metadata?.["sessionId"]).toBe(chatB.id)
     }),
   )
+
+  // END-TO-END: the per-line monitor watch loop. Arm `monitor` on the REAL
+  // channel.py `stream`, which prints one line per peer message and NEVER exits.
+  // `monitor` wakes the agent inline on each stdout line, so TWO peer messages
+  // are delivered through ONE persistent monitor with NO re-arm between them —
+  // the advantage over bash_background's wake-on-exit (which re-arms per message).
+  it.instance("delivers peer messages inline via channel.py stream (continuous, no re-arm)", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed
+      const monitor = yield* runMonitor
+      const backgroundStop = yield* runBackgroundStop
+      const jobs = yield* BackgroundJob.Service
+      const CHANNEL_PY = "/Users/fab/dev/agent-channel/opencode/channel/scripts/channel.py"
+      const channel = "monstreamtest_" + Date.now()
+      const promptCalls: Array<{ text: string }> = []
+      const ops = { prompt: (input: any) => Effect.sync(() => promptCalls.push(input.parts[0])) }
+      const ctx = {
+        sessionID: chat.id,
+        messageID: assistant.id,
+        agent: "build",
+        abort: new AbortController().signal,
+        extra: { promptOps: ops },
+        messages: [],
+        metadata: () => Effect.void,
+        ask: () => Effect.void,
+      }
+
+      // Start the watcher's cursor at the current (empty) end, like a real join.
+      yield* Effect.promise(() => Bun.spawn(["python3", CHANNEL_PY, "setup", channel, "watcher"]).exited)
+
+      const armed = yield* monitor.execute(
+        { command: `python3 ${CHANNEL_PY} stream ${channel} watcher`, description: "watch channel" },
+        ctx as any,
+      )
+      expect(armed.output).toContain("Monitor armed")
+      const monId = (armed.metadata as { monitorId: string }).monitorId
+
+      // First peer message -> stream prints one line -> monitor wakes inline.
+      yield* Effect.promise(() => Bun.spawn(["python3", CHANNEL_PY, "send", channel, "peer", "ping-one"]).exited)
+      yield* Effect.gen(function* () {
+        while (!promptCalls.some((p) => p.text.includes("ping-one"))) yield* Effect.sleep("50 millis")
+      }).pipe(Effect.timeout("6 seconds"))
+
+      // The SAME monitor is still running — stream never exited, so no re-arm.
+      const midLive = (yield* jobs.list()).filter(
+        (j) => j.type === "monitor" && j.status === "running" && j.metadata?.["sessionId"] === chat.id,
+      )
+      expect(midLive.length).toBe(1)
+      expect(midLive[0]!.id).toBe(monId)
+
+      // Second peer message -> a SECOND inline wake through that same monitor.
+      yield* Effect.promise(() => Bun.spawn(["python3", CHANNEL_PY, "send", channel, "peer", "ping-two"]).exited)
+      yield* Effect.gen(function* () {
+        while (!promptCalls.some((p) => p.text.includes("ping-two"))) yield* Effect.sleep("50 millis")
+      }).pipe(Effect.timeout("6 seconds"))
+
+      // Both arrived as monitor output lines, with no intervening re-arm.
+      expect(promptCalls.some((p) => p.text.includes("monitor_output") && p.text.includes("ping-one"))).toBe(true)
+      expect(promptCalls.some((p) => p.text.includes("ping-two"))).toBe(true)
+
+      // Tear it down explicitly (stream would also self-exit on a peer 'leave').
+      yield* backgroundStop.execute({ id: monId }, ctx as any)
+      yield* Effect.sleep("200 millis")
+      const after = (yield* jobs.list()).filter(
+        (j) => j.type === "monitor" && j.status === "running" && j.metadata?.["sessionId"] === chat.id,
+      )
+      expect(after.length).toBe(0)
+      yield* Effect.promise(() => Bun.spawn(["rm", "-f", `/tmp/claude-channels/${channel}.ndjson`]).exited)
+    }),
+  )
 })
 
 // background_list spans BOTH tool types, so it needs both feature flags. A dedicated layer
