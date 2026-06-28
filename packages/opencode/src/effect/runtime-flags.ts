@@ -12,6 +12,9 @@ const enabledByExperimental = (name: string) =>
   Config.all({ experimental, enabled: Config.boolean(name).pipe(Config.option) }).pipe(
     Config.map((flags) => Option.getOrElse(flags.enabled, () => flags.experimental)),
   )
+// On by default (parity with Claude Code's always-available run_in_background); the
+// env var still overrides, so OPENCODE_EXPERIMENTAL_<X>=false opts back out.
+const enabledByDefault = (name: string) => Config.boolean(name).pipe(Config.withDefault(true))
 
 export class Service extends ConfigService.Service<Service>()("@opencode/RuntimeFlags", {
   autoShare: bool("OPENCODE_AUTO_SHARE"),
@@ -52,8 +55,8 @@ export class Service extends ConfigService.Service<Service>()("@opencode/Runtime
   bashDefaultTimeoutMs: positiveInteger("OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS"),
   experimentalNativeLlm: bool("OPENCODE_EXPERIMENTAL_NATIVE_LLM"),
   experimentalWebSockets: bool("OPENCODE_EXPERIMENTAL_WEBSOCKETS"),
-  experimentalMonitor: enabledByExperimental("OPENCODE_EXPERIMENTAL_MONITOR"),
-  experimentalBackgroundRun: enabledByExperimental("OPENCODE_EXPERIMENTAL_BACKGROUND_RUN"),
+  experimentalMonitor: enabledByDefault("OPENCODE_EXPERIMENTAL_MONITOR"),
+  experimentalBackgroundRun: enabledByDefault("OPENCODE_EXPERIMENTAL_BACKGROUND_RUN"),
   client: Config.string("OPENCODE_CLIENT").pipe(Config.withDefault("cli")),
 }) {}
 
