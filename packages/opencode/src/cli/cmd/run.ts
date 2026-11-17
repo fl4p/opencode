@@ -1008,6 +1008,8 @@ export async function runMini(input: MiniCommandInput) {
     replay: input.replay ?? true,
     "replay-limit": input.replayLimit,
     replayLimit: input.replayLimit,
+    auto: false,
+    interactive: false,
     "dangerously-skip-permissions": false,
     dangerouslySkipPermissions: false,
     demo: input.demo ?? false,
